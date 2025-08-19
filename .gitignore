@@ -1,0 +1,31 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+errors.log
+trades.log
+
+# Secrets and env
+.env
+config/secrets.env
+
+# Caches
+*.cache/
+*.pytest_cache/
+
+# Data/artifacts (add if created later)
+artifacts/
+data/
