@@ -6,3 +6,6 @@ torch==2.0.1
 ta==0.10.2
 python-dotenv==1.0.0
 websocket-client==1.6.1
+shap
+xgboost
+lightgbm

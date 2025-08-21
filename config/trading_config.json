@@ -7,14 +7,16 @@
   "batch_size": 16,
   "prediction_threshold": 0.70,
   "sell_threshold": 0.30,
-  "position_size_pct": 100,
+  "position_size_pct": 10,
   "max_loss_per_trade_pct": 3,
   "min_leverage": 2,
   "max_leverage": 3,
   "stop_loss_percent": 2,
   "take_profit_percent": 5,
   "max_positions": 2,
-  "risk_per_trade": 1,
-  "live_trading": true,
-  "auto_execute": true
+  "risk_per_trade": 2,
+  "live_trading": false,
+  "auto_execute": false,
+  "paper_trading": true,
+  "api_rate_limit_ms": 100
 }

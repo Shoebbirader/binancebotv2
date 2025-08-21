@@ -4,6 +4,68 @@ import numpy as np
 from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 from sklearn.preprocessing import StandardScaler
 import warnings
+# --- Advanced Technical Indicator Utilities ---
+def compute_bid_ask_spread(order_book):
+    """
+    Compute bid-ask spread from order book snapshot.
+    order_book: dict with 'bids' and 'asks' as lists of [price, size]
+    Returns: spread (float)
+    """
+    try:
+        best_bid = order_book['bids'][0][0]
+        best_ask = order_book['asks'][0][0]
+        return best_ask - best_bid
+    except Exception:
+        return np.nan
+
+def compute_order_book_depth_imbalance(order_book, depth=5):
+    """
+    Compute order book depth imbalance (top N levels).
+    Returns: imbalance (float)
+    """
+    try:
+        bid_vol = sum([x[1] for x in order_book['bids'][:depth]])
+        ask_vol = sum([x[1] for x in order_book['asks'][:depth]])
+        return (bid_vol - ask_vol) / (bid_vol + ask_vol + 1e-9)
+    except Exception:
+        return np.nan
+
+def compute_volume_profile(df, bins=10):
+    """
+    Compute volume profile: high volume price nodes.
+    Returns: price level with max volume (support/resistance)
+    """
+    try:
+        price_bins = pd.cut(df['close'], bins)
+        vol_profile = df.groupby(price_bins)['volume'].sum()
+        max_vol_price = vol_profile.idxmax().mid
+        return max_vol_price
+    except Exception:
+        return np.nan
+
+def compute_trade_imbalance(trades):
+    """
+    Compute trade imbalance from tick/trade data.
+    trades: DataFrame with 'is_buyer_maker' and 'qty'
+    Returns: imbalance (float)
+    """
+    try:
+        buy_qty = trades.loc[~trades['is_buyer_maker'], 'qty'].sum()
+        sell_qty = trades.loc[trades['is_buyer_maker'], 'qty'].sum()
+        return (buy_qty - sell_qty) / (buy_qty + sell_qty + 1e-9)
+    except Exception:
+        return np.nan
+
+def compute_funding_rate_trend(funding_rates, window=24):
+    """
+    Compute funding rate trend (rolling mean).
+    funding_rates: Series of funding rates
+    Returns: rolling mean
+    """
+    try:
+        return funding_rates.rolling(window).mean().iloc[-1]
+    except Exception:
+        return np.nan
 
 # ---------- Helper utilities for advanced features (safe and lightweight) ----------
 def _ensure_dt_index(df):
@@ -70,6 +132,19 @@ def engineer_features(df):
     df = df.copy()
     # Ensure a timestamp column exists for time-based features
     try:
+        # --- Advanced Technical Indicators ---
+        # Order Book Analysis (stub: requires live order book data)
+        df['bid_ask_spread'] = np.nan  # Replace with compute_bid_ask_spread(order_book) in live
+        df['order_book_imbalance'] = np.nan  # Replace with compute_order_book_depth_imbalance(order_book)
+
+        # Volume Profile (support/resistance)
+        df['volume_profile_node'] = compute_volume_profile(df, bins=10)
+
+        # Market Microstructure (stub: requires tick/trade data)
+        df['trade_imbalance'] = np.nan  # Replace with compute_trade_imbalance(trades)
+
+        # Funding Rate Analysis (stub: requires funding rate data)
+        df['funding_rate_trend'] = np.nan  # Replace with compute_funding_rate_trend(funding_rates)
         if 'timestamp' not in df.columns:
             # If index is datetime-like, use it
             if isinstance(df.index, pd.DatetimeIndex):
@@ -316,6 +391,8 @@ def engineer_features(df):
         df['bb_low'] = ta.volatility.bollinger_lband(df['close'])
         print(f"Fallback: Engineered {len(df.columns)} basic features")
     
+    import gc
+    gc.collect()
     return df
 
 def select_best_features(X, y, k=15):
@@ -392,72 +469,127 @@ def augment_data(X, y, augmentation_factor=1):
         print(f"Data augmentation error: {e}")
         return X, y
 
-def prepare_training_data_enhanced(data, feature_columns, lookback, target_horizon=5):
+def prepare_training_data_enhanced(data, feature_columns, lookback, target_horizon=1):
     """
-    Enhanced data preparation with better target creation
+    Enhanced data preparation with proper lookahead prevention and NaN handling
     """
-    data = data.dropna()
-    
-    X = []
-    y = []
-    
-    for i in range(lookback, len(data) - target_horizon):
-        # Features: lookback periods of feature data
-        X.append(data[feature_columns].iloc[i-lookback:i].values)
+    try:
+        # Ensure we have the required columns
+        required_cols = feature_columns + ['close']
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            print(f"Missing columns: {missing_cols}")
+            return None, None
+            
+        # Create a working copy and handle NaN values
+        df = data[required_cols].copy()
         
-        # Enhanced target: Consider price movement magnitude
-        current_price = data['close'].iloc[i]
-        future_price = data['close'].iloc[i + target_horizon]
+        # Fill NaN values with forward fill, then backward fill, then 0
+        df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
         
-        # Calculate price change percentage
-        price_change_pct = (future_price - current_price) / current_price * 100
+        # Check if we have enough data
+        if len(df) < lookback + 2:
+            print(f"Warning: Insufficient data. Need {lookback + 2}, have {len(df)}")
+            return None, None
+
+        X = []
+        y = []
+
+        # Use only the next immediate price movement to prevent lookahead bias
+        for i in range(lookback, len(df) - 1):
+            # Features: lookback periods of feature data (only past data)
+            feature_slice = df[feature_columns].iloc[i-lookback:i].values
+            
+            # Ensure numeric type and handle NaN
+            try:
+                feature_slice = feature_slice.astype(np.float64)
+                feature_slice = np.nan_to_num(feature_slice, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Skip if all values are zero or NaN
+                if np.all(feature_slice == 0) or np.all(np.isnan(feature_slice)):
+                    continue
+            except (ValueError, TypeError):
+                # Handle non-numeric data
+                feature_slice = np.zeros_like(feature_slice, dtype=np.float64)
+            X.append(feature_slice)
+
+            # Target: Next immediate price movement (1 candle ahead)
+            current_price = df['close'].iloc[i]
+            next_price = df['close'].iloc[i + 1]
+
+            # Calculate immediate price change
+            price_change_pct = (next_price - current_price) / current_price * 100
+
+            # Less strict target: 1 for upward movement > 0.1%, 0 otherwise
+            if price_change_pct > 0.1:
+                y.append(1)  # Buy signal
+            else:
+                y.append(0)  # Hold/Sell signal
+
+        if len(X) == 0:
+            print("Warning: No valid data after filtering")
+            return None, None
+            
+        X = np.array(X, dtype=np.float32)
+        y = np.array(y, dtype=np.int64)
+
+        print(f"Successfully prepared data: X shape {X.shape}, y shape {y.shape}")
+        print(f"Target distribution: {np.bincount(y)}")
+
+        return X, y
         
-        # More sophisticated target: 1 for significant upward movement, 0 otherwise
-        if price_change_pct > 1.0:  # 1% or more increase
-            y.append(1)
-        elif price_change_pct < -1.0:  # 1% or more decrease
-            y.append(0)
-        else:
-            # For small movements, use trend direction
-            y.append(1 if price_change_pct > 0 else 0)
-    
-    X = np.array(X, dtype=np.float32)
-    y = np.array(y, dtype=np.int64)
-    
-    return X, y
+    except Exception as e:
+        print(f"Error in prepare_training_data_enhanced: {e}")
+        return None, None
 
 def prepare_training_data_simple(data, feature_columns, lookback):
     """
-    FIXED: Simple fallback data preparation
+    FIXED: Simple fallback data preparation with proper scaler handling
     """
-    # Select features and target
-    features = data[feature_columns].values.astype(np.float32)
-    prices = data['close'].values.astype(np.float32)
-    
-    # Create simple target: 1 if price goes up next period, 0 otherwise
-    target = np.zeros(len(prices) - 1, dtype=np.int64)
-    for i in range(len(prices) - 1):
-        if prices[i + 1] > prices[i]:
-            target[i] = 1
-    
-    # Create sequences
-    X, y = [], []
-    for i in range(lookback, len(features) - 1):
-        X.append(features[i-lookback:i])
-        y.append(target[i])
-    
-    X = np.array(X, dtype=np.float32)
-    y = np.array(y, dtype=np.int64)
-    
-    # Remove any NaN values
-    valid_indices = ~(np.isnan(X).any(axis=(1, 2)) | np.isnan(y))
-    X = X[valid_indices]
-    y = y[valid_indices]
-    
-    # Normalize features
-    scaler = StandardScaler()
-    X_reshaped = X.reshape(-1, X.shape[-1])
-    X_scaled = scaler.fit_transform(X_reshaped)
-    X = X_scaled.reshape(X.shape[0], X.shape[1], -1)
-    
-    return X, y
+    try:
+        # Select features and target
+        features = data[feature_columns].values.astype(np.float32)
+        prices = data['close'].values.astype(np.float32)
+        
+        # Create simple target: 1 if price goes up next period, 0 otherwise
+        target = np.zeros(len(prices) - 1, dtype=np.int64)
+        for i in range(len(prices) - 1):
+            if prices[i + 1] > prices[i]:
+                target[i] = 1
+        
+        # Create sequences
+        X, y = [], []
+        for i in range(lookback, len(features) - 1):
+            X.append(features[i-lookback:i])
+            y.append(target[i])
+        
+        X = np.array(X, dtype=np.float32)
+        y = np.array(y, dtype=np.int64)
+        
+        # Remove any NaN values
+        valid_indices = ~(np.isnan(X).any(axis=(1, 2)) | np.isnan(y))
+        X = X[valid_indices]
+        y = y[valid_indices]
+        
+        # Check if we have any data left
+        if len(X) == 0:
+            print("Warning: No valid data after NaN removal")
+            return None, None
+        
+        # Normalize features
+        scaler = StandardScaler()
+        X_reshaped = X.reshape(-1, X.shape[-1])
+        
+        # Ensure no NaN in reshaped data
+        if np.isnan(X_reshaped).any():
+            print("Warning: NaN values found in reshaped data, filling with 0")
+            X_reshaped = np.nan_to_num(X_reshaped, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        X_scaled = scaler.fit_transform(X_reshaped)
+        X = X_scaled.reshape(X.shape[0], X.shape[1], -1)
+        
+        return X, y
+        
+    except Exception as e:
+        print(f"Error in prepare_training_data_simple: {e}")
+        return None, None

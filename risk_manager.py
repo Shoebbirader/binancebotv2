@@ -1,9 +1,63 @@
 import numpy as np
+import pandas as pd
 import logging
 from datetime import datetime, timedelta
 import threading
 
 class RiskManager:
+    # --- Portfolio Optimization ---
+    def compute_correlation_matrix(self, price_data_dict):
+        """
+        Compute real-time correlation matrix for all symbols in portfolio.
+        price_data_dict: {symbol: price_series}
+        Returns: pandas DataFrame correlation matrix
+        """
+        import pandas as pd
+        df = pd.DataFrame(price_data_dict)
+        corr_matrix = df.pct_change().corr()
+        return corr_matrix
+
+    def risk_parity_weights(self, price_data_dict):
+        """
+        Calculate risk parity weights for each symbol (equal risk contribution).
+        Returns: dict {symbol: weight}
+        """
+        import numpy as np
+        df = pd.DataFrame(price_data_dict)
+        returns = df.pct_change().dropna()
+        vol = returns.std()
+        inv_vol = 1 / vol
+        weights = inv_vol / inv_vol.sum()
+        return weights.to_dict()
+
+    def kelly_criterion(self, win_rate, win_loss_ratio):
+        """
+        Kelly formula for optimal position sizing.
+        win_rate: probability of winning (0-1)
+        win_loss_ratio: average win/average loss
+        Returns: optimal fraction of capital to risk
+        """
+        kelly = max(0, win_rate - (1 - win_rate) / win_loss_ratio)
+        return kelly
+
+    def black_litterman_weights(self, market_weights, views, tau=0.05):
+        """
+        Placeholder for Black-Litterman Bayesian portfolio optimization.
+        market_weights: dict {symbol: market weight}
+        views: dict {symbol: expected return}
+        tau: uncertainty scaling factor
+        Returns: dict {symbol: optimized weight}
+        """
+        # For demo, blend market weights and views
+        blended = {}
+        for symbol in market_weights:
+            view = views.get(symbol, 0)
+            blended[symbol] = (1 - tau) * market_weights[symbol] + tau * view
+        # Normalize
+        total = sum(blended.values())
+        for symbol in blended:
+            blended[symbol] /= total
+        return blended
     def __init__(self, config):
         self.max_loss_pct = config['max_loss_per_trade_pct']
         self.position_size_pct = config['position_size_pct']
@@ -21,19 +75,29 @@ class RiskManager:
         self._lock = threading.Lock()
         self._last_entry_times = {}
         
-    def calculate_position_size(self, balance, price, leverage):
-        """Enhanced position sizing with risk management"""
+    def calculate_position_size(self, balance, current_price, leverage):
+        """Calculate position size based on risk management with proper leverage accounting"""
         try:
-            # Base position size
-            raw_qty = (self.position_size_pct / 100.0) * balance * leverage / price
+            # Calculate actual position value based on risk per trade
+            risk_amount = balance * (self.max_loss_pct / 100.0)
             
-            # Risk-adjusted sizing based on volatility
-            risk_adjusted_qty = raw_qty * 0.8  # Conservative approach
+            # Calculate position size in USDT
+            position_value_usdt = risk_amount * (100.0 / self.stop_loss_percent)
             
-            quantity = round(risk_adjusted_qty, 3)
-            final_qty = max(quantity, 0.001)
+            # Apply position size percentage limit
+            max_position_usdt = balance * (self.position_size_pct / 100.0)
+            position_value_usdt = min(position_value_usdt, max_position_usdt)
             
-            logging.info(f"Position size calculated: {final_qty:.6f} (Risk adjusted from {raw_qty:.6f})")
+            # Convert to quantity
+            quantity = position_value_usdt / current_price
+            
+            # Apply leverage (position size / leverage = margin required)
+            leveraged_quantity = quantity * leverage
+            
+            # Ensure minimum quantity
+            final_qty = max(round(leveraged_quantity, 3), 0.001)
+            
+            logging.info(f"Position size: {final_qty:.6f} @ ${current_price:.2f} (Risk: ${risk_amount:.2f}, Leverage: {leverage}x)")
             return final_qty
             
         except Exception as e:

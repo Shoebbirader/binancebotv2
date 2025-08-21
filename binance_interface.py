@@ -1,6 +1,7 @@
 import os
 import time
-import json
+import logging
+import numpy as np
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceOrderException
 from binance.enums import *
@@ -10,8 +11,171 @@ import logging
 load_dotenv('config/secrets.env')
 
 class BinanceInterface:
+    # --- Advanced Execution Methods ---
+    def _rate_limit(self):
+        """Enforce API rate limiting for all calls"""
+        current_time = time.time() * 1000
+        time_since_last = current_time - getattr(self, 'last_request_time', 0)
+        min_interval = 120  # ms, adjust as needed
+        if time_since_last < min_interval:
+            time.sleep((min_interval - time_since_last) / 1000)
+        self.last_request_time = time.time() * 1000
+
+    def smart_order_routing(self, symbol, side, quantity, order_type='MARKET', price=None):
+        self._rate_limit()
+        """
+        Simulate smart order routing (stub: only Binance venue).
+        In future, aggregate order books from multiple venues for best price.
+        """
+        # For now, just place order on Binance
+        logging.info(f"Smart order routing: Executing {side} {quantity} {symbol} on Binance")
+        return self.place_futures_order(symbol, side, quantity, order_type, price)
+
+    def execute_twap(self, symbol, side, total_quantity, intervals=5, interval_sec=10, order_type='MARKET'):
+        self._rate_limit()
+        """
+        Execute TWAP (Time-Weighted Average Price) order by splitting into intervals.
+        """
+        qty_per_order = total_quantity / intervals
+        orders = []
+        for i in range(intervals):
+            order = self.place_futures_order(symbol, side, qty_per_order, order_type)
+            orders.append(order)
+            logging.info(f"TWAP order {i+1}/{intervals} placed: {order}")
+            time.sleep(interval_sec)
+        return orders
+
+    def execute_vwap(self, symbol, side, total_quantity, price_data, order_type='MARKET'):
+        self._rate_limit()
+        """
+        Execute VWAP (Volume-Weighted Average Price) order using historical volume profile.
+        price_data: DataFrame with 'close' and 'volume'
+        """
+        # Calculate VWAP
+        vwap = (price_data['close'] * price_data['volume']).sum() / price_data['volume'].sum()
+        logging.info(f"Calculated VWAP for {symbol}: {vwap}")
+        # Place order at VWAP price if possible
+        return self.place_futures_order(symbol, side, total_quantity, order_type, price=vwap)
+
+    def analyze_slippage(self, symbol, expected_price, executed_order):
+        """
+        Analyze slippage between expected and executed price.
+        executed_order: dict from Binance API
+        """
+        try:
+            fill_price = float(executed_order.get('avgFillPrice', executed_order.get('price', 0)))
+            slippage = fill_price - expected_price
+            logging.info(f"Slippage for {symbol}: {slippage} (expected {expected_price}, actual {fill_price})")
+            return slippage
+        except Exception as e:
+            logging.error(f"Slippage analysis error: {e}")
+            return None
+
+    def log_latency(self, start_time, end_time):
+        """
+        Log simulated latency for order execution. For real latency optimization, consider co-located servers.
+        """
+        latency_ms = (end_time - start_time) * 1000
+        logging.info(f"Order execution latency: {latency_ms:.2f} ms")
+        return latency_ms
+    # --- Advanced Order Types ---
+    def place_trailing_stop_order(self, symbol, side, quantity, activation_price, callback_rate):
+        self._rate_limit()
+        """
+        Place a trailing stop order (Binance Futures).
+        """
+        try:
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type='TRAILING_STOP_MARKET',
+                quantity=quantity,
+                activationPrice=activation_price,
+                callbackRate=callback_rate,
+                reduceOnly=True
+            )
+            logging.info(f"Trailing stop order placed: {order}")
+            return order
+        except Exception as e:
+            logging.error(f"Failed to place trailing stop order: {e}")
+            return None
+
+    def place_oco_order(self, symbol, side, quantity, price, stop_price, stop_limit_price):
+        self._rate_limit()
+        """
+        Place an OCO (One-Cancels-Other) order (Binance Spot only, demo for Futures).
+        """
+        try:
+            # Binance Futures does not support OCO directly, so simulate with two orders
+            main_order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type='LIMIT',
+                quantity=quantity,
+                price=price,
+                timeInForce='GTC'
+            )
+            stop_order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type='STOP_MARKET',
+                quantity=quantity,
+                stopPrice=stop_price,
+                price=stop_limit_price,
+                reduceOnly=True
+            )
+            logging.info(f"OCO simulated: main {main_order}, stop {stop_order}")
+            return {'main': main_order, 'stop': stop_order}
+        except Exception as e:
+            logging.error(f"Failed to place OCO order: {e}")
+            return None
+
+    def place_scaled_orders(self, symbol, side, total_quantity, price_levels):
+        self._rate_limit()
+        """
+        Place multiple scaled orders at different price levels.
+        price_levels: list of (price, quantity)
+        """
+        orders = []
+        try:
+            for price, qty in price_levels:
+                order = self.client.futures_create_order(
+                    symbol=symbol,
+                    side=side,
+                    type='LIMIT',
+                    quantity=qty,
+                    price=price,
+                    timeInForce='GTC'
+                )
+                orders.append(order)
+            logging.info(f"Scaled orders placed: {orders}")
+            return orders
+        except Exception as e:
+            logging.error(f"Failed to place scaled orders: {e}")
+            return orders
+
+    def place_iceberg_order(self, symbol, side, total_quantity, price, iceberg_qty):
+        self._rate_limit()
+        """
+        Place an iceberg order (hidden large order).
+        """
+        try:
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type='LIMIT',
+                quantity=total_quantity,
+                price=price,
+                timeInForce='GTC',
+                icebergQty=iceberg_qty
+            )
+            logging.info(f"Iceberg order placed: {order}")
+            return order
+        except Exception as e:
+            logging.error(f"Failed to place iceberg order: {e}")
+            return None
     def __init__(self, use_testnet: bool = False):
-        """Initialize Binance client with API credentials"""
+        """Initialize Binance client with API credentials and rate limiting"""
         try:
             api_key = os.getenv('BINANCE_API_KEY')
             api_secret = os.getenv('BINANCE_API_SECRET')
@@ -20,10 +184,12 @@ class BinanceInterface:
                 raise ValueError("Binance API credentials not found in secrets.env")
             
             self.client = Client(api_key, api_secret)
+            self.last_request_time = 0
+            self.rate_limit_ms = 100  # 100ms between requests
             if use_testnet:
                 self.client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
             self.test_connection()
-            logging.info("Binance API connection established successfully")
+            logging.info("Binance API connection established successfully with rate limiting")
             
         except Exception as e:
             logging.error(f"Failed to initialize Binance client: {e}")
@@ -41,6 +207,7 @@ class BinanceInterface:
             raise
     
     def get_account_balance(self):
+        self._rate_limit()
         """Get real-time account balance with better error handling"""
         try:
             account = self.client.futures_account()
@@ -76,6 +243,7 @@ class BinanceInterface:
             return {'USDT': {'available_balance': 1000, 'wallet_balance': 1000, 'unrealized_pnl': 0}}
 
     def get_symbol_filters(self, symbol):
+        self._rate_limit()
         """Fetch symbol filters (tick size, step size, min notional)."""
         info = self.client.futures_exchange_info()
         sym = next((s for s in info['symbols'] if s['symbol'] == symbol), None)
@@ -85,6 +253,7 @@ class BinanceInterface:
         return filters
 
     def format_quantity(self, symbol, quantity):
+        self._rate_limit()
         """Round quantity to the allowed step size and min qty."""
         filters = self.get_symbol_filters(symbol)
         lot = filters.get('LOT_SIZE', {})
@@ -97,6 +266,7 @@ class BinanceInterface:
         return float(f"{qty:.{decimals}f}")
 
     def format_price(self, symbol, price):
+        self._rate_limit()
         """Round price to tick size."""
         filters = self.get_symbol_filters(symbol)
         pf = filters.get('PRICE_FILTER', {})
@@ -106,22 +276,31 @@ class BinanceInterface:
         p = price - (price % tick)
         return float(f"{p:.{decimals}f}")
     
+
+
     def get_current_price(self, symbol):
-        """Get real-time price for a symbol"""
+        self._rate_limit()
+        """Get real-time price for a symbol with rate limiting and NaN handling"""
         try:
+            self._rate_limit()
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             price = float(ticker['price'])
+            import math
+            if math.isnan(price) or price <= 0:
+                logging.warning(f"Invalid price received for {symbol}: {price}")
+                return None
             logging.info(f"Current price for {symbol}: {price}")
             return price
             
         except BinanceAPIException as e:
             logging.error(f"Binance API error getting price for {symbol}: {e}")
-            raise
+            return None
         except Exception as e:
             logging.error(f"Unexpected error getting price for {symbol}: {e}")
-            raise
+            return None
     
     def get_position_info(self, symbol):
+        self._rate_limit()
         """Get current position information"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
@@ -152,6 +331,7 @@ class BinanceInterface:
             raise
     
     def place_futures_order(self, symbol, side, quantity, order_type='MARKET', price=None, stop_loss=None, take_profit=None):
+        self._rate_limit()
         """Place futures order with (optional) reduce-only SL and TP. Returns dict with order ids."""
         try:
             # Format qty/price
@@ -228,6 +408,7 @@ class BinanceInterface:
             raise
     
     def close_position(self, symbol, side, quantity):
+        self._rate_limit()
         """Close an open position"""
         try:
             close_side = 'SELL' if side == 'BUY' else 'BUY'
@@ -253,6 +434,7 @@ class BinanceInterface:
             raise
     
     def set_leverage(self, symbol, leverage):
+        self._rate_limit()
         """Set leverage for a symbol"""
         try:
             result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
@@ -267,6 +449,7 @@ class BinanceInterface:
             raise
 
     def cancel_all_open_orders(self, symbol):
+        self._rate_limit()
         """Cancel all open orders for a symbol (e.g., after position exit)."""
         try:
             result = self.client.futures_cancel_all_open_orders(symbol=symbol)
