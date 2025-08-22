@@ -19,10 +19,10 @@ class DataCollector:
         self._cache = {}
         self._cache_max_size = 100  # Limit cache to 100 entries
 
-    def fetch_historical(self, symbol, limit=1000):
+    def fetch_historical(self, symbol, limit=2000):  # Increased from 1000 to 2000
         """Fetch historical data with caching and optimized processing"""
         try:
-            limit = min(limit, 1000)
+            limit = min(limit, 1500)  # Increased limit to allow more data
             
             # Simple caching check with expiration (5 minutes for real-time trading)
             import time
@@ -32,8 +32,8 @@ class DataCollector:
             if cache_key in self._cache:
                 try:
                     cached_data, cache_time = self._cache[cache_key]
-                    # Cache expires after 5 minutes for fresher data
-                    if current_time - cache_time < 300:  # 5 minutes
+                    # Cache expires after 2 minutes for fresher data in active trading
+                    if current_time - cache_time < 120:  # 2 minutes
                         logging.info(f"Using cached data for {symbol} (age: {(current_time - cache_time):.0f}s)")
                         return cached_data
                     else:

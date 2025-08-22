@@ -182,14 +182,41 @@ def engineer_features(df):
         df['resistance_distance'] = (df['pivot_high'] - close) / close
         df['support_distance'] = (close - df['pivot_low']) / close
         
-        # Time features (if timestamp exists)
+        # Enhanced features for better prediction accuracy
+        
+        # Market microstructure features
+        df['price_momentum_3'] = df['close'].pct_change(3)
+        df['price_momentum_5'] = df['close'].pct_change(5) 
+        df['volume_price_trend'] = ((df['close'] - df['close'].shift(1)) * df['volume']).rolling(10).mean()
+        
+        # Volatility clustering
+        df['volatility_5'] = df['close'].rolling(5).std() / df['close']
+        df['volatility_10'] = df['close'].rolling(10).std() / df['close']
+        df['vol_ratio'] = df['volatility_5'] / (df['volatility_10'] + 1e-8)
+        
+        # Market strength indicators
+        df['close_to_high'] = (df['close'] - df['low']) / (df['high'] - df['low'] + 1e-8)
+        df['close_to_open'] = (df['close'] - df['open']) / (df['open'] + 1e-8)
+        
+        # Price acceleration
+        df['price_accel'] = df['close'].pct_change().diff()
+        
+        # Volume indicators
+        df['volume_ma_ratio'] = df['volume'] / df['volume'].rolling(20).mean()
+        df['volume_std_ratio'] = df['volume'] / df['volume'].rolling(20).std()
+        
+        # Time features (enhanced)
         if isinstance(df.index, pd.DatetimeIndex):
             df['hour'] = df.index.hour
             df['day_of_week'] = df.index.dayofweek
+            df['is_market_hours'] = ((df.index.hour >= 8) & (df.index.hour <= 20)).astype(int)
+            df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
         elif 'timestamp' in df.columns:
             ts = pd.to_datetime(df['timestamp'])
             df['hour'] = ts.dt.hour
             df['day_of_week'] = ts.dt.dayofweek
+            df['is_market_hours'] = ((ts.dt.hour >= 8) & (ts.dt.hour <= 20)).astype(int)
+            df['is_weekend'] = (ts.dt.dayofweek >= 5).astype(int)
         
         print(f"Optimized: Engineered {len(df.columns)} features")
         return df
@@ -309,6 +336,11 @@ def prepare_training_data_enhanced(data, feature_columns, lookback, target_horiz
         y = []
 
         # Use only the next immediate price movement to prevent lookahead bias
+        # Pre-filter data to ensure X and y synchronization
+        valid_indices = []
+        valid_targets = []
+        
+        # First pass: identify valid samples and their targets
         for i in range(lookback, len(df) - 1):
             # Target: Next immediate price movement (1 candle ahead)
             current_price = df['close'].iloc[i]
@@ -317,35 +349,36 @@ def prepare_training_data_enhanced(data, feature_columns, lookback, target_horiz
             # Calculate immediate price change
             price_change_pct = (next_price - current_price) / current_price * 100
 
-            # Skip sideways movements first to keep X and y synchronized
-            if abs(price_change_pct) < 0.3:  # Skip small movements
-                continue
+            # Balanced target definition for equal BUY/SELL opportunities
+            if price_change_pct > 0.12:  # BUY signal threshold (slightly lower)
+                valid_indices.append(i)
+                valid_targets.append(1)  # BUY signal
+            elif price_change_pct < -0.12:  # SELL signal threshold (symmetric)
+                valid_indices.append(i)
+                valid_targets.append(0)  # SELL signal
+            # Skip neutral movements between -0.12% and +0.12%
 
+        # Second pass: create features for valid indices only
+        for idx, target in zip(valid_indices, valid_targets):
             # Features: lookback periods of feature data (only past data)
-            feature_slice = df[feature_columns].iloc[i-lookback:i].values
+            feature_slice = df[feature_columns].iloc[idx-lookback:idx].values
             
             # Ensure numeric type and handle NaN
             try:
                 feature_slice = feature_slice.astype(np.float64)
                 feature_slice = np.nan_to_num(feature_slice, nan=0.0, posinf=0.0, neginf=0.0)
                 
-                # Skip if all values are zero or NaN
+                # Skip if all values are zero or NaN (but maintain sync)
                 if np.all(feature_slice == 0) or np.all(np.isnan(feature_slice)):
                     continue
+                    
+                # Add both feature and target together (ensures synchronization)
+                X.append(feature_slice)
+                y.append(target)
+                
             except (ValueError, TypeError):
-                # Handle non-numeric data
-                feature_slice = np.zeros_like(feature_slice, dtype=np.float64)
-            
-            # Add feature slice to X
-            X.append(feature_slice)
-
-            # Correct target definition:
-            # 1 = BUY signal (price going up significantly)  
-            # 0 = SELL signal (price going down significantly)
-            if price_change_pct > 0.3:
-                y.append(1)  # BUY signal - price going up
-            else:  # price_change_pct < -0.3 (due to earlier abs check)
-                y.append(0)  # SELL signal - price going down
+                # Handle non-numeric data - skip both X and y
+                continue
 
         if len(X) == 0:
             print("Warning: No valid data after filtering")

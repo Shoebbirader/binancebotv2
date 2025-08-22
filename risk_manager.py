@@ -173,24 +173,30 @@ class RiskManager:
             return False
     
     def add_position(self, symbol, side, entry_price, quantity, leverage, stop_loss, take_profit, bracket_orders=None):
-        """Add new position to tracking"""
+        """Add new position to tracking with duplicate prevention"""
         try:
-            position = {
-                'symbol': symbol,
-                'side': side,
-                'entry_price': entry_price,
-                'quantity': quantity,
-                'leverage': leverage,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'entry_time': datetime.now(),
-                'status': 'ACTIVE',
-                'bracket_orders': bracket_orders or {}
-            }
-            
             with self._lock:
+                # Prevent duplicate positions for same symbol
+                if symbol in self.active_positions:
+                    logging.warning(f"Position already exists for {symbol}, skipping duplicate")
+                    return
+                
+                position = {
+                    'symbol': symbol,
+                    'side': side,
+                    'entry_price': entry_price,
+                    'quantity': quantity,
+                    'leverage': leverage,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'entry_time': datetime.now(),
+                    'status': 'ACTIVE',
+                    'bracket_orders': bracket_orders or {}
+                }
+                
                 self.active_positions[symbol] = position
                 self._last_entry_times[symbol] = datetime.now()
+                
             logging.info(f"Position added to tracking: {symbol} {side} {quantity}")
             
         except Exception as e:

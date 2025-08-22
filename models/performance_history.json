@@ -1,0 +1,178 @@
+{
+  "BTCUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:05:38.182404",
+        "prediction": 0.05877947062253952,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:38:51.407750",
+        "prediction": 0.0004113109316676855,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "ETHUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:07:50.722877",
+        "prediction": 0.00019821198657155037,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:43:50.280452",
+        "prediction": 5.165805418982927e-07,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "1000PEPEUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:11:44.915112",
+        "prediction": 3.401553840376437e-05,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:51:08.206759",
+        "prediction": 5.0198796088807285e-05,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "ADAUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:13:24.447713",
+        "prediction": 6.200654752319679e-05,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:41:52.560350",
+        "prediction": 1.234630781254964e-05,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "AIOTUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:13:31.929963",
+        "prediction": 0.11128609627485275,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:43:20.435063",
+        "prediction": 0.012496864423155785,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "API3USDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:16:46.457316",
+        "prediction": 7.992342943907715e-06,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:46:59.769577",
+        "prediction": 0.009727377444505692,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "XRPUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:17:10.967729",
+        "prediction": 9.950994126484147e-07,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:51:22.876574",
+        "prediction": 1.5340626191573392e-07,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "DOGEUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:20:15.915425",
+        "prediction": 0.00025376753183081746,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:51:38.198897",
+        "prediction": 2.3443561758540454e-07,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "DOTUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:20:22.339731",
+        "prediction": 0.0017751683481037617,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:59:06.212568",
+        "prediction": 4.1826702101843694e-08,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "SUIUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:22:21.596658",
+        "prediction": 8.495566362398677e-06,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:59:16.274105",
+        "prediction": 3.221684607979114e-08,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  },
+  "LINKUSDT": {
+    "lstm": [
+      {
+        "timestamp": "2025-08-22T18:23:01.715379",
+        "prediction": 1.0271959638430417e-07,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T18:58:40.862826",
+        "prediction": 1.0684464868404575e-08,
+        "confidence": 0.5,
+        "actual_outcome": null
+      }
+    ]
+  }
+}

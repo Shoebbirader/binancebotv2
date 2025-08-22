@@ -131,6 +131,16 @@ class PaperTradingInterface:
                 'entry_price': current_price
             }
             
+            # Prevent duplicate positions
+            if symbol in self.positions:
+                logging.warning(f"Paper trading position already exists for {symbol}, skipping duplicate")
+                self.current_balance += margin_required  # Return the margin
+                return {
+                    'main': {'orderId': f"duplicate_{int(time.time() * 1000)}", 'status': 'DUPLICATE'},
+                    'sl': None,
+                    'tp': None
+                }
+            
             # Create position
             self.positions[symbol] = {
                 'symbol': symbol,
@@ -230,21 +240,35 @@ class PaperTradingInterface:
                 self.positions[symbol]['unrealized_pnl'] = pnl
                 
         # Check exit conditions and close if needed (this calls close_position which has its own lock)
-        if position.get('stop_loss'):
-            if position['side'] == 'LONG' and current_price <= position['stop_loss']:
-                self.close_position(symbol, 'SELL', position['quantity'])
-                logging.info(f"Paper trading: Stop loss triggered for {symbol}")
-            elif position['side'] == 'SHORT' and current_price >= position['stop_loss']:
-                self.close_position(symbol, 'BUY', position['quantity'])
-                logging.info(f"Paper trading: Stop loss triggered for {symbol}")
-                
-        if position.get('take_profit'):
-            if position['side'] == 'LONG' and current_price >= position['take_profit']:
-                self.close_position(symbol, 'SELL', position['quantity'])
-                logging.info(f"Paper trading: Take profit triggered for {symbol}")
-            elif position['side'] == 'SHORT' and current_price <= position['take_profit']:
-                self.close_position(symbol, 'BUY', position['quantity'])
-                logging.info(f"Paper trading: Take profit triggered for {symbol}")
+        # Only check exit conditions if position still exists (avoid race conditions)
+        if symbol in self.positions:
+            if position.get('stop_loss'):
+                if position['side'] == 'LONG' and current_price <= position['stop_loss']:
+                    try:
+                        self.close_position(symbol, 'SELL', position['quantity'])
+                        logging.info(f"Paper trading: Stop loss triggered for {symbol}")
+                    except Exception as e:
+                        logging.warning(f"Failed to close position on stop loss: {e}")
+                elif position['side'] == 'SHORT' and current_price >= position['stop_loss']:
+                    try:
+                        self.close_position(symbol, 'BUY', position['quantity'])
+                        logging.info(f"Paper trading: Stop loss triggered for {symbol}")
+                    except Exception as e:
+                        logging.warning(f"Failed to close position on stop loss: {e}")
+                    
+            if symbol in self.positions and position.get('take_profit'):
+                if position['side'] == 'LONG' and current_price >= position['take_profit']:
+                    try:
+                        self.close_position(symbol, 'SELL', position['quantity'])
+                        logging.info(f"Paper trading: Take profit triggered for {symbol}")
+                    except Exception as e:
+                        logging.warning(f"Failed to close position on take profit: {e}")
+                elif position['side'] == 'SHORT' and current_price <= position['take_profit']:
+                    try:
+                        self.close_position(symbol, 'BUY', position['quantity'])
+                        logging.info(f"Paper trading: Take profit triggered for {symbol}")
+                    except Exception as e:
+                        logging.warning(f"Failed to close position on take profit: {e}")
 
     def log_latency(self, start_time, end_time):
         """Simulate latency logging for paper trading"""
@@ -273,13 +297,10 @@ class PaperTradingInterface:
     def place_oco_order(self, symbol, side, quantity, take_profit, stop_loss, stop_limit_price):
         return self.place_futures_order(symbol, side, quantity)
     def place_scaled_orders(self, symbol, side, total_quantity, price_levels):
-        orders = []
-        for price, qty in price_levels:
-            order = self.place_futures_order(symbol, side, qty)
-            if order and 'main' in order and order['main']:
-                order['main']['price'] = price
-            orders.append(order['main'] if order and 'main' in order else None)
-        return {'main': orders[0] if orders else None, 'scaled': orders}
+        """Place scaled orders without executing multiple individual orders"""
+        # For paper trading, just execute as single order to avoid duplicates
+        logging.info(f"Paper trading: Simulating scaled order as single order for {symbol}")
+        return self.place_futures_order(symbol, side, total_quantity)
     
     def cancel_all_open_orders(self, symbol):
         """Simulate cancelling all open orders for a symbol"""

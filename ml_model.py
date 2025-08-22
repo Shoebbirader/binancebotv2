@@ -20,16 +20,22 @@ except ImportError:
 class CryptoLSTM(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, layers=2):
         super(CryptoLSTM, self).__init__()
+        # Optimized LSTM for faster training
         self.lstm = nn.LSTM(input_dim, hidden_dim, layers, batch_first=True, dropout=0.2)
         self.dropout = nn.Dropout(0.3)
+        
+        # Simplified dense layers for faster training
         self.fc1 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.relu = nn.ReLU()
         self.fc2 = nn.Linear(hidden_dim // 2, output_dim)
+        
+        self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
         
     def forward(self, x):
+        # Simplified forward pass for faster training
         lstm_out, _ = self.lstm(x)
         last_output = lstm_out[:, -1, :]
+        
         out = self.dropout(last_output)
         out = self.fc1(out)
         out = self.relu(out)
@@ -236,7 +242,7 @@ def train_model_balanced(model, X, y, epochs=25, batch_size=32, lr=0.002):
         patience = 5  # Reduced from 25
         patience_counter = 0
 
-        for epoch in range(min(epochs, 15)):  # Cap at 15 epochs max
+        for epoch in range(min(epochs, 20)):  # Reduced to 20 epochs to prevent timeout
             # Training
             model.train()
             train_loss = 0.0
@@ -334,7 +340,16 @@ def train_random_forest(X, y):
             X = X[:min_len]
             y = y[:min_len]
         
-        clf = RandomForestClassifier(n_estimators=50, random_state=42, max_depth=10)
+        clf = RandomForestClassifier(
+            n_estimators=100,  # Reduced from 200 for faster training
+            max_depth=12,      # Reduced from 15 
+            min_samples_split=5,
+            min_samples_leaf=2,
+            max_features='sqrt',
+            bootstrap=True,
+            random_state=42,
+            n_jobs=-1          # Use all CPU cores for parallel training
+        )
         X_flat = X.reshape(X.shape[0], -1)
         clf.fit(X_flat, y)
         return clf
@@ -363,11 +378,18 @@ def train_xgboost(X, y):
             warnings.filterwarnings("ignore", category=FutureWarning)
             
             clf = xgb.XGBClassifier(
-                n_estimators=50, 
-                max_depth=6,
+                n_estimators=100,  # Reduced from 200 for faster training
+                max_depth=6,       # Reduced from 8
+                learning_rate=0.15, # Increased for faster convergence
+                subsample=0.8,
+                colsample_bytree=0.8,
+                min_child_weight=3,
+                reg_alpha=0.1,
+                reg_lambda=0.1,
                 use_label_encoder=False, 
                 eval_metric='logloss',
-                verbosity=0  # Suppress training output
+                verbosity=0,
+                n_jobs=-1          # Use all CPU cores
             )
             clf.fit(X_flat, y)
         return clf
@@ -389,13 +411,18 @@ def train_lightgbm(X, y):
             
         X_flat = X.reshape(X.shape[0], -1)
         clf = lgb.LGBMClassifier(
-            n_estimators=50,
-            learning_rate=0.1,
-            max_depth=6,
-            num_leaves=31,
-            min_child_samples=20,
+            n_estimators=100,     # Reduced from 200 for faster training
+            learning_rate=0.1,    # Increased for faster convergence
+            max_depth=8,          # Reduced from 10
+            num_leaves=64,        # Reduced from 100
+            min_child_samples=10,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
             random_state=42,
-            verbosity=-1
+            verbosity=-1,
+            n_jobs=-1             # Use all CPU cores
         )
         clf.fit(X_flat, y)
         return clf

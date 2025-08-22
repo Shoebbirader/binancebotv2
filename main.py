@@ -20,6 +20,10 @@ from binance_interface import BinanceInterface
 from paper_trading import PaperTradingInterface, init_paper_trading
 from logger import log_error, log_info, log_warning, log_trade, log_prediction, log_paper_trade
 from model_manager import ModelManager
+from ensemble_predictor import EnhancedEnsemble, ensemble_predictor
+from model_performance_tracker import performance_tracker
+from position_monitor import PositionMonitor
+from data_synchronizer import validate_training_data, synchronize_arrays
 import warnings
 warnings.filterwarnings('ignore')
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -141,10 +145,10 @@ def main():
         print(f"--- Processing {symbol} ---")
         start_time = time.time()
         try:
-            # Collect data
-            data = data_collector.fetch_historical(symbol)
-            if data is None or len(data) < lookback + 100:
-                print(f"Insufficient data for {symbol}, skipping...")
+            # Collect more data for better training
+            data = data_collector.fetch_historical(symbol, limit=1500)
+            if data is None or len(data) < lookback + 200:  # Increased minimum data requirement
+                print(f"Insufficient data for {symbol}, skipping... (need {lookback + 200}, got {len(data) if data is not None else 0})")
                 return symbol, None
 
             print(f"Data loaded: {len(data)} samples for {symbol}")
@@ -180,6 +184,17 @@ def main():
             if X is None or y is None or X.size == 0 or y.size == 0:
                 print(f"No training data after preparation for {symbol}, skipping...")
                 return symbol, None
+            
+            # Comprehensive data validation and synchronization
+            is_valid, errors = validate_training_data(X, y, symbol)
+            if not is_valid:
+                print(f"Data validation failed for {symbol}: {errors}")
+                # Try to synchronize arrays
+                X, y = synchronize_arrays(X, y, symbol)
+                if X is None or y is None:
+                    print(f"Failed to synchronize data for {symbol}, skipping...")
+                    return symbol, None
+                
             print(f"Training {symbol}, X shape: {X.shape}, y shape: {y.shape}")
 
             # Convert y to int64 for bincount
@@ -191,32 +206,41 @@ def main():
             print(f"Features: {len(feature_columns)}, Target distribution: {dist}")
 
             # Validate training data
-            if len(X) < 50:  # Minimum training samples
-                print(f"Insufficient training data for {symbol}: {len(X)} samples")
+            if len(X) < 100:  # Increased minimum for enhanced models
+                print(f"Insufficient training data for {symbol}: {len(X)} samples (need 100+)")
                 return symbol, None
             
-            # Check class balance
+            # Check class balance and ensure minimum samples per class
             unique, counts = np.unique(y, return_counts=True)
             if len(unique) < 2:
                 print(f"Only one class in training data for {symbol}")
                 return symbol, None
             
+            # Ensure minimum samples per class for reliable training
+            min_class_size = min(counts)
+            if min_class_size < 20:  # Need at least 20 samples per class
+                print(f"Insufficient samples per class for {symbol}: {dict(zip(unique, counts))}")
+                return symbol, None
+            
             print(f"Training data validation passed: {len(X)} samples, classes: {dict(zip(unique, counts))}")
 
-            # Train LSTM
-            print("Training Balanced LSTM...")
+            # Train Optimized LSTM  
+            print("Training Optimized LSTM...")
             try:
-                lstm_model = CryptoLSTM(input_dim=len(feature_columns), hidden_dim=64, output_dim=1)
+                lstm_model = CryptoLSTM(input_dim=len(feature_columns), hidden_dim=64, output_dim=1)  # Balanced hidden_dim
                 lstm_model = train_model_balanced(lstm_model, X, y, epochs=epochs, batch_size=batch_size, lr=learning_rate)
                 pred_lstm = predict_model(lstm_model, X[-1:])
                 print(f"LSTM prediction: {pred_lstm:.4f}")
                 
-                # Save LSTM model
+                # Save LSTM model with performance tracking
                 model_manager.save_model(lstm_model, symbol, 'lstm', {
                     'features': len(feature_columns),
                     'samples': len(X),
-                    'accuracy': 0.0  # Could add validation accuracy here
+                    'accuracy': 0.0
                 })
+                
+                # Record prediction for performance tracking (confidence not available yet)
+                performance_tracker.record_prediction(symbol, 'lstm', pred_lstm, 0.5)
                 
             except Exception as e:
                 print(f"LSTM training error for {symbol}: {e}")
@@ -272,50 +296,48 @@ def main():
                 print(f"LightGBM error for {symbol}: {e}")
                 pred_lgb = 0.5
 
-            # Ensemble prediction with validation
-            preds = [pred_lstm, pred_rf, pred_xgb, pred_lgb]
-            preds = [p for p in preds if p is not None and not np.isnan(p) and 0 <= p <= 1]
-            if len(preds) < 2:  # Require at least 2 models for ensemble
-                print(f"Warning: Not enough valid model predictions for {symbol} ({len(preds)}/4), skipping trade")
-                return symbol, None
+            # Enhanced ensemble prediction with weighted voting
+            predictions_dict = {
+                'lstm': pred_lstm,
+                'random_forest': pred_rf, 
+                'xgboost': pred_xgb,
+                'lightgbm': pred_lgb
+            }
             
-            ensemble_pred = np.mean(preds)
-            if not (0 <= ensemble_pred <= 1):
+            # Use enhanced ensemble predictor
+            ensemble_pred, confidence = ensemble_predictor.weighted_ensemble_predict(predictions_dict)
+            
+            if ensemble_pred is None or not (0 <= ensemble_pred <= 1):
                 print(f"Warning: Invalid ensemble prediction {ensemble_pred} for {symbol}, skipping trade")
                 return symbol, None
             
-            # Model consensus check - require agreement on direction
-            # Check if models agree on BUY (>0.6) or SELL (<0.4) direction
-            buy_votes = [p for p in preds if p > 0.6]
-            sell_votes = [p for p in preds if p < 0.4]
-            consensus_votes = max(len(buy_votes), len(sell_votes))
+            print(f"📊 {symbol}: Enhanced ensemble prediction {ensemble_pred:.4f} (confidence: {confidence:.3f})")
             
-            if consensus_votes < len(preds) * 0.5:  # At least 50% of models should agree on direction
-                print(f"Warning: No model consensus for {symbol}, skipping trade (buy votes: {len(buy_votes)}, sell votes: {len(sell_votes)} out of {len(preds)})")
+            # Enhanced trading signal generation with balanced thresholds
+            action, should_execute = ensemble_predictor.get_trading_signal(
+                ensemble_pred, confidence, 
+                buy_threshold=0.6,     # Balanced threshold for BUY signals
+                sell_threshold=0.4,    # Balanced threshold for SELL signals  
+                min_confidence=0.3     # Increased minimum confidence
+            )
+            
+            if not should_execute:
+                print(f"🟡 {symbol}: {action} signal but insufficient confidence ({confidence:.3f}), skipping trade.")
+                log_prediction(symbol, ensemble_pred, confidence, action)
                 return symbol, None
 
-            # Fixed prediction logic: 
-            # High prediction (>0.65) = BUY signal (model confident price will rise)
-            # Low prediction (<0.35) = SELL signal (model confident price will fall)
-            buy_threshold = prediction_threshold  # e.g., 0.65
-            sell_threshold = adaptive_config.get('sell_threshold', 0.35)  # e.g., 0.35
-            
-            if ensemble_pred >= buy_threshold:
-                action = "BUY"
-                print(f"🟢 {symbol}: Prediction {ensemble_pred:.4f} >= BUY threshold {buy_threshold}, {action} signal!")
-                log_prediction(symbol, ensemble_pred, ensemble_pred, action)
+            # Execute the trade based on enhanced ensemble decision
+            if action == "BUY":
+                print(f"🟢 {symbol}: {action} signal! Prediction: {ensemble_pred:.4f}, Confidence: {confidence:.3f}")
+                log_prediction(symbol, ensemble_pred, confidence, action)
                 with binance_lock:
-                    execute_live_trade(symbol, "BUY", ensemble_pred, risk_manager, binance, config, regime_summary, data)
-            elif ensemble_pred <= sell_threshold:
-                action = "SELL"
-                print(f"🔴 {symbol}: Prediction {ensemble_pred:.4f} <= SELL threshold {sell_threshold}, {action} signal!")
-                log_prediction(symbol, ensemble_pred, ensemble_pred, action)
+                    execute_live_trade(symbol, "BUY", confidence, risk_manager, binance, config, regime_summary, data)
+            elif action == "SELL":
+                print(f"🔴 {symbol}: {action} signal! Prediction: {ensemble_pred:.4f}, Confidence: {confidence:.3f}")
+                log_prediction(symbol, ensemble_pred, confidence, action)
                 with binance_lock:
-                    execute_live_trade(symbol, "SELL", ensemble_pred, risk_manager, binance, config, regime_summary, data)
-            else:
-                action = "HOLD"
-                print(f"🟡 {symbol}: Prediction {ensemble_pred:.4f} between thresholds ({sell_threshold}-{buy_threshold}), HOLD.")
-                log_prediction(symbol, ensemble_pred, ensemble_pred, action)
+                    execute_live_trade(symbol, "SELL", confidence, risk_manager, binance, config, regime_summary, data)
+            # HOLD case already handled above
 
             elapsed_time = time.time() - start_time
             print(f"✅ Completed {symbol} in {elapsed_time:.1f}s")
@@ -327,7 +349,7 @@ def main():
             return symbol, None
 
     # Optimized parallel processing with timeout and progress tracking
-    max_workers = min(len(config['symbols']), max(1, os.cpu_count() or 2))
+    max_workers = min(3, max(1, (os.cpu_count() or 2) // 2))  # Reduced workers to prevent timeout
     print(f"🔄 Processing {len(config['symbols'])} symbols with {max_workers} workers...")
     
     completed_symbols = 0
@@ -335,10 +357,10 @@ def main():
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_symbol, symbol): symbol for symbol in config['symbols']}
-        for future in as_completed(futures, timeout=600):  # 10 minute timeout
+        for future in as_completed(futures, timeout=1800):  # Increased to 30 minutes for enhanced models
             symbol = futures[future]
             try:
-                _sym, _pred = future.result(timeout=120)  # 2 minutes per symbol
+                _sym, _pred = future.result(timeout=300)  # Increased to 5 minutes per symbol
                 completed_symbols += 1
                 print(f"✅ Completed {symbol} ({completed_symbols}/{len(config['symbols'])})")
             except TimeoutError:
@@ -353,6 +375,12 @@ def main():
     if failed_symbols:
         print(f"⚠️ {len(failed_symbols)} symbols failed: {failed_symbols}")
     print(f"✅ Successfully processed {completed_symbols}/{len(config['symbols'])} symbols")
+
+    # Start position monitoring for paper trading
+    if config.get('paper_trading', False):
+        position_monitor = PositionMonitor(binance, risk_manager)
+        position_monitor.start_monitoring(check_interval=60)  # Check every minute
+        print("📊 Position monitoring started for paper trading")
 
     # Portfolio optimization: correlation and risk parity
     if price_data_dict:
@@ -673,22 +701,26 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
         if order_bundle is not None and isinstance(order_bundle, dict):
             binance.analyze_slippage(symbol, current_price, order_bundle.get('main', order_bundle))
 
-        # Add to position tracking
-        print(f"✅ Order placed successfully: {main_order.get('orderId', 'N/A')}")
-        risk_manager.add_position(
-            symbol=symbol,
-            side=action,
-            entry_price=current_price,
-            quantity=position_size,
-            leverage=leverage,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            bracket_orders={
-                'main': main_order,
-                'sl': order_bundle.get('sl') if isinstance(order_bundle, dict) else None,
-                'tp': order_bundle.get('tp') if isinstance(order_bundle, dict) else None
-            }
-        )
+        # Add to position tracking (with duplicate check)
+        order_status = main_order.get('status', 'UNKNOWN')
+        if order_status == 'DUPLICATE':
+            print(f"⚠️ Duplicate position prevented for {symbol}")
+        else:
+            print(f"✅ Order placed successfully: {main_order.get('orderId', 'N/A')}")
+            risk_manager.add_position(
+                symbol=symbol,
+                side=action,
+                entry_price=current_price,
+                quantity=position_size,
+                leverage=leverage,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                bracket_orders={
+                    'main': main_order,
+                    'sl': order_bundle.get('sl') if isinstance(order_bundle, dict) else None,
+                    'tp': order_bundle.get('tp') if isinstance(order_bundle, dict) else None
+                }
+            )
         log_trade(symbol, action, current_price, position_size)
         
         # Log comprehensive trade data to trades.csv
