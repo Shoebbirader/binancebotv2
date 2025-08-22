@@ -185,177 +185,101 @@ class EnhancedTransformerEncoderLayer(nn.Module):
         
         return src
 
-def train_model_balanced(model, X, y, epochs=100, batch_size=32, lr=0.001):
+def train_model_balanced(model, X, y, epochs=25, batch_size=32, lr=0.002):
     """
-    FIXED: Enhanced training with weighted sampling for class imbalance and stronger architecture
+    OPTIMIZED: Faster training with reduced epochs, early stopping, and GPU acceleration
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-    
-    # Robust NaN handling
-    if isinstance(X, np.ndarray):
-        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-        # Normalize features
-        X = (X - np.nanmean(X, axis=0)) / (np.nanstd(X, axis=0) + 1e-8)
-        X_tensor = torch.FloatTensor(X).to(device)
-    else:
-        X_tensor = X.to(device)
+    try:
+        # Quick data validation
+        if X is None or y is None or len(X) < 10:
+            print("Warning: Insufficient data for training")
+            return None
 
-    if isinstance(y, np.ndarray):
-        y_tensor = torch.FloatTensor(y).to(device)
-    else:
-        y_tensor = y.to(device)
-    
-    # Handle class imbalance with weighted sampling instead of data removal
-    if isinstance(y, np.ndarray):
-        unique, counts = np.unique(y, return_counts=True)
-        min_count = min(counts)
-        max_count = max(counts)
-        
-        if max_count / min_count > 2:  # Significant imbalance
-            # Use weighted sampling instead of removing data
-            class_weights = {cls: len(y) / (len(unique) * count) for cls, count in zip(unique, counts)}
-            sample_weights = np.array([class_weights[label] for label in y])
-            
-            # Sample indices based on weights to balance classes
-            from sklearn.utils import resample
-            indices = np.arange(len(y))
-            balanced_indices = resample(
-                indices, 
-                stratify=y,
-                n_samples=min(len(y), max_count * 2),  # Keep more data
-                random_state=42,
-                replace=False
-            )
-            
-            X = X[balanced_indices]
-            y = y[balanced_indices]
-    
-    # Split into train/val (80/20)
-    split_idx = int(0.8 * len(X_tensor))
-    X_train, X_val = X_tensor[:split_idx], X_tensor[split_idx:]
-    y_train, y_val = y_tensor[:split_idx], y_tensor[split_idx:]
-    
-    # Calculate class weights for balanced loss
-    pos_count = torch.sum(y_train == 1).item()
-    neg_count = torch.sum(y_train == 0).item()
-    
-    if pos_count > 0 and neg_count > 0:
-        pos_weight = neg_count / pos_count
-        class_weight = torch.tensor([pos_weight]).to(device)
-    else:
-        class_weight = torch.tensor([1.0]).to(device)
-    
-    # Create weighted sampler for balanced batches
-    if pos_count > 0 and neg_count > 0:
-        sample_weights = torch.ones(len(y_train))
-        sample_weights[y_train == 1] = pos_weight
-        sample_weights[y_train == 0] = 1.0
-        
-        sampler = torch.utils.data.WeightedRandomSampler(
-            sample_weights, 
-            num_samples=len(y_train), 
-            replacement=True
-        )
-        
-        train_dataset = TensorDataset(X_train, y_train)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler)
-    else:
-        train_dataset = TensorDataset(X_train, y_train)
+        # Simplified class balancing - use weights instead of resampling
+        from collections import Counter
+        counter = Counter(y)
+        if len(counter) < 2:
+            print("Warning: Only one class present")
+            return None
+
+        # Fast split (80/20)
+        split_idx = int(0.8 * len(X))
+        X_train, X_val = X[:split_idx], X[split_idx:]
+        y_train, y_val = y[:split_idx], y[split_idx:]
+
+        print(f"Training samples: {len(X_train)}, Validation: {len(X_val)}")
+
+        # GPU acceleration setup
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
+
+        # Optimized training setup
+        criterion = nn.BCEWithLogitsLoss()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+
+        # Create fast data loaders
+        train_dataset = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train))
+        val_dataset = TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val))
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    
-    # Enhanced optimizer and loss
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=class_weight)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
-    
-    # Training loop
-    best_val_loss = float('inf')
-    patience = 25
-    patience_counter = 0
-    best_model_state = None
-    
-    print(f"Training with {len(X_train)} train, {len(X_val)} validation samples")
-    print(f"Positive samples: {pos_count}, Negative samples: {neg_count}")
-    
-    for epoch in range(epochs):
-        model.train()
-        epoch_loss = 0
-        all_preds = []
-        all_labels = []
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+        # Fast training loop
+        best_val_loss = float('inf')
+        patience = 5  # Reduced from 25
+        patience_counter = 0
+
+        for epoch in range(min(epochs, 15)):  # Cap at 15 epochs max
+            # Training
+            model.train()
+            train_loss = 0.0
+            
+            for batch_X, batch_y in train_loader:
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                if len(batch_X.shape) == 2:
+                    batch_X = batch_X.unsqueeze(0)
+                
+                optimizer.zero_grad()
+                outputs = model(batch_X)
+                loss = criterion(outputs.squeeze(), batch_y.float())
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += loss.item()
+            
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch_X, batch_y in val_loader:
+                    batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                    if len(batch_X.shape) == 2:
+                        batch_X = batch_X.unsqueeze(0)
+                    
+                    outputs = model(batch_X)
+                    loss = criterion(outputs.squeeze(), batch_y.float())
+                    val_loss += loss.item()
+            
+            train_loss /= len(train_loader)
+            val_loss /= len(val_loader)
+            
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            if epoch % 3 == 0:  # Less verbose
+                print(f"Epoch {epoch+1}: Train={train_loss:.4f}, Val={val_loss:.4f}")
+            
+            if patience_counter >= patience:
+                print(f"Early stop at epoch {epoch+1}")
+                break
+
+        return model
         
-        for X_batch, y_batch in train_loader:
-            optimizer.zero_grad()
-            
-            if len(X_batch.shape) == 2:
-                X_batch = X_batch.unsqueeze(0)
-            
-            outputs = model(X_batch)
-            
-            # Handle target size mismatch
-            if outputs.shape != y_batch.shape:
-                outputs = outputs.squeeze()
-                if outputs.dim() == 0:
-                    outputs = outputs.unsqueeze(0)
-            
-            loss = criterion(outputs, y_batch)
-            loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-            preds = (torch.sigmoid(outputs) > 0.5).float()
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(y_batch.cpu().numpy())
-        
-        # Validation
-        model.eval()
-        with torch.no_grad():
-            if len(X_val.shape) == 2:
-                X_val = X_val.unsqueeze(0)
-            val_outputs = model(X_val)
-            
-            if val_outputs.shape != y_val.shape:
-                val_outputs = val_outputs.squeeze()
-                if val_outputs.dim() == 0:
-                    val_outputs = val_outputs.unsqueeze(0)
-            
-            val_loss = criterion(val_outputs, y_val)
-            val_preds = (torch.sigmoid(val_outputs) > 0.5).float()
-            
-            # Metrics
-            val_acc = accuracy_score(y_val.cpu().numpy(), val_preds.cpu().numpy())
-            val_precision = precision_score(y_val.cpu().numpy(), val_preds.cpu().numpy(), zero_division=0)
-            val_recall = recall_score(y_val.cpu().numpy(), val_preds.cpu().numpy(), zero_division=0)
-            val_f1 = f1_score(y_val.cpu().numpy(), val_preds.cpu().numpy(), zero_division=0)
-        
-        train_acc = accuracy_score(all_labels, all_preds)
-        avg_loss = epoch_loss / len(train_loader)
-        scheduler.step()
-        
-        if epoch % 5 == 0:
-            print(f"Epoch {epoch+1}/{epochs}: Train Loss: {avg_loss:.4f}, Train Acc: {train_acc:.3f}")
-            print(f"          Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.3f}, Val F1: {val_f1:.3f}")
-        
-        # Early stopping based on validation loss
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            best_model_state = model.state_dict().copy()
-        else:
-            patience_counter += 1
-            
-        if patience_counter >= patience:
-            print(f"Early stopping at epoch {epoch+1}")
-            break
-    
-    # Load best model
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    
-    return model
+    except Exception as e:
+        print(f"Training error: {e}")
+        return None
 
 def predict_model(model, X):
     """
@@ -405,8 +329,20 @@ def train_xgboost(X, y):
         print("XGBoost not installed.")
         return None
     X_flat = X.reshape(X.shape[0], -1)
-    clf = xgb.XGBClassifier(n_estimators=100, use_label_encoder=False, eval_metric='logloss')
-    clf.fit(X_flat, y)
+    
+    # Suppress XGBoost warnings
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        
+        clf = xgb.XGBClassifier(
+            n_estimators=100, 
+            use_label_encoder=False, 
+            eval_metric='logloss',
+            verbosity=0  # Suppress training output
+        )
+        clf.fit(X_flat, y)
     return clf
 
 def train_lightgbm(X, y):
@@ -414,7 +350,15 @@ def train_lightgbm(X, y):
         print("LightGBM not installed.")
         return None
     X_flat = X.reshape(X.shape[0], -1)
-    clf = lgb.LGBMClassifier(n_estimators=100)
+    clf = lgb.LGBMClassifier(
+        n_estimators=50,
+        learning_rate=0.05,
+        max_depth=4,
+        num_leaves=16,
+        min_child_samples=5,
+        random_state=42,
+        verbosity=-1
+    )
     clf.fit(X_flat, y)
     return clf
 

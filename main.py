@@ -18,7 +18,8 @@ from risk_manager import RiskManager
 from advanced_risk import AdvancedRiskManager
 from binance_interface import BinanceInterface
 from paper_trading import PaperTradingInterface, init_paper_trading
-from logger import log_error, log_info, log_warning, log_trade, log_prediction
+from logger import log_error, log_info, log_warning, log_trade, log_prediction, log_paper_trade
+from model_manager import ModelManager
 import warnings
 warnings.filterwarnings('ignore')
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,18 +36,29 @@ def main():
     adv_risk_mgr = AdvancedRiskManager(max_drawdown_pct=15)
     from market_regime import MarketRegimeDetector
     regime_detector = MarketRegimeDetector()
+    model_manager = ModelManager()
 
     # Initialize trading interface (Paper or Live)
     try:
         if config.get('paper_trading', True):
+            # Verify API credentials even for paper trading (needed for real prices)
+            import os
+            api_key = os.getenv('BINANCE_API_KEY')
+            api_secret = os.getenv('BINANCE_API_SECRET')
+            if not api_key or not api_secret:
+                log_error("Binance API credentials required even for paper trading (for real price data)")
+                print("❌ Missing Binance API credentials in config/secrets.env")
+                return
+            
             binance = init_paper_trading(initial_balance=10000.0)
-            log_info("Paper trading mode enabled")
-            print("📊 Paper trading mode enabled")
+            log_info("Paper trading mode enabled with real price feeds")
+            print("📊 Paper trading mode enabled with real price feeds")
             print(f"💰 Paper balance: 10000.00 USDT")
         else:
             use_testnet = bool(config.get('testnet', False))
             binance = BinanceInterface(use_testnet=use_testnet)
-            log_info("Binance API connection established")
+            log_info("Live trading mode enabled")
+            print("🚨 LIVE TRADING MODE ENABLED - REAL MONEY AT RISK")
             # Show current account balance summary
             try:
                 balances = binance.get_account_balance()
@@ -55,6 +67,11 @@ def main():
                 available = float(usdt.get('available_balance', 0))
                 env_label = 'TESTNET' if use_testnet else 'LIVE'
                 print(f"💼 Account [{env_label}] | USDT Wallet: {wallet:.2f} | Available: {available:.2f}")
+                
+                # Safety check for live trading
+                if not use_testnet and available < 50:
+                    print("⚠️ WARNING: Low available balance for live trading")
+                    
             except Exception as e:
                 log_warning(f"Unable to display account balance: {e}")
     except Exception as e:
@@ -77,11 +94,26 @@ def main():
     
     # Portfolio-level price data collection for optimization
     price_data_dict = {}
-    rp_weights = None  # Ensure rp_weights is always defined
     # Parallel per-symbol processing
     binance_lock = threading.Lock()
-    def process_symbol(symbol, rp_weights=None):
+    # --- Collect price data for all symbols first ---
+    for symbol in config['symbols']:
+        data = data_collector.fetch_historical(symbol)
+        if data is not None and len(data) > 0:
+            price_data_dict[symbol] = data['close']
+    # --- Calculate risk parity weights ---
+    rp_weights = None
+    if price_data_dict:
+        try:
+            rp_weights = risk_manager.risk_parity_weights(price_data_dict)
+            print(f"Risk parity weights: {rp_weights}")
+        except Exception as e:
+            print(f"Error calculating risk parity weights: {e}")
+            rp_weights = None
+    # --- Symbol processing function ---
+    def process_symbol(symbol):
         print(f"--- Processing {symbol} ---")
+        start_time = time.time()
         try:
             # Collect data
             data = data_collector.fetch_historical(symbol)
@@ -104,20 +136,7 @@ def main():
             print(f"Market regime for {symbol}: {regime_summary}")
 
             # Regime-adaptive parameters
-            adaptive_config = dict(config)
-            # Volatility regime
-            if regime_summary['volatility'] == 'HIGH':
-                adaptive_config['position_size_pct'] = max(5, config.get('position_size_pct', 10) // 2)
-                adaptive_config['stop_loss_percent'] = min(4, config.get('stop_loss_percent', 2) * 2)
-            elif regime_summary['volatility'] == 'LOW':
-                adaptive_config['position_size_pct'] = min(15, config.get('position_size_pct', 10) * 2)
-                adaptive_config['stop_loss_percent'] = max(1, config.get('stop_loss_percent', 2) // 2)
-            # Trend regime
-            if regime_summary['trend'] == 'STRONG_TREND':
-                adaptive_config['take_profit_percent'] = min(10, config.get('take_profit_percent', 5) * 2)
-            elif regime_summary['trend'] == 'SIDEWAYS':
-                adaptive_config['take_profit_percent'] = max(2, config.get('take_profit_percent', 5) // 2)
-                adaptive_config['position_size_pct'] = max(2, config.get('position_size_pct', 10) // 2)
+            adaptive_config = adapt_config_by_regime(config, regime_summary)
 
             # Portfolio risk parity adjustment
             if rp_weights and symbol in rp_weights:
@@ -145,6 +164,19 @@ def main():
                 dist = []
             print(f"Features: {len(feature_columns)}, Target distribution: {dist}")
 
+            # Validate training data
+            if len(X) < 50:  # Minimum training samples
+                print(f"Insufficient training data for {symbol}: {len(X)} samples")
+                return symbol, None
+            
+            # Check class balance
+            unique, counts = np.unique(y, return_counts=True)
+            if len(unique) < 2:
+                print(f"Only one class in training data for {symbol}")
+                return symbol, None
+            
+            print(f"Training data validation passed: {len(X)} samples, classes: {dict(zip(unique, counts))}")
+
             # Train LSTM
             print("Training Balanced LSTM...")
             try:
@@ -152,6 +184,14 @@ def main():
                 lstm_model = train_model_balanced(lstm_model, X, y, epochs=epochs, batch_size=batch_size, lr=learning_rate)
                 pred_lstm = predict_model(lstm_model, X[-1:])
                 print(f"LSTM prediction: {pred_lstm:.4f}")
+                
+                # Save LSTM model
+                model_manager.save_model(lstm_model, symbol, 'lstm', {
+                    'features': len(feature_columns),
+                    'samples': len(X),
+                    'accuracy': 0.0  # Could add validation accuracy here
+                })
+                
             except Exception as e:
                 print(f"LSTM training error for {symbol}: {e}")
                 log_error(f"LSTM training error for {symbol}: {e}")
@@ -163,6 +203,13 @@ def main():
                 rf_model = train_random_forest(X, y)
                 pred_rf = rf_model.predict_proba(X[-1:].reshape(1, -1))[0, 1]
                 print(f"Random Forest prediction: {pred_rf:.4f}")
+                
+                # Save Random Forest model
+                model_manager.save_model(rf_model, symbol, 'random_forest', {
+                    'samples': len(X),
+                    'features': len(feature_columns)
+                })
+                
             except Exception as e:
                 print(f"Random Forest error for {symbol}: {e}")
                 pred_rf = 0.5
@@ -172,6 +219,13 @@ def main():
                 xgb_model = train_xgboost(X, y)
                 pred_xgb = xgb_model.predict_proba(X[-1:].reshape(1, -1))[0, 1] if xgb_model else 0.5
                 print(f"XGBoost prediction: {pred_xgb:.4f}")
+                
+                if xgb_model:
+                    model_manager.save_model(xgb_model, symbol, 'xgboost', {
+                        'samples': len(X),
+                        'features': len(feature_columns)
+                    })
+                
             except Exception as e:
                 print(f"XGBoost error for {symbol}: {e}")
                 pred_xgb = 0.5
@@ -181,21 +235,37 @@ def main():
                 lgb_model = train_lightgbm(X, y)
                 pred_lgb = lgb_model.predict_proba(X[-1:].reshape(1, -1))[0, 1] if lgb_model else 0.5
                 print(f"LightGBM prediction: {pred_lgb:.4f}")
+                
+                if lgb_model:
+                    model_manager.save_model(lgb_model, symbol, 'lightgbm', {
+                        'samples': len(X),
+                        'features': len(feature_columns)
+                    })
+                
             except Exception as e:
                 print(f"LightGBM error for {symbol}: {e}")
                 pred_lgb = 0.5
 
-            # Ensemble prediction
+            # Ensemble prediction with validation
             preds = [pred_lstm, pred_rf, pred_xgb, pred_lgb]
-            preds = [p for p in preds if p is not None and not np.isnan(p)]
-            if len(preds) == 0:
-                ensemble_pred = 0.5
-            else:
-                ensemble_pred = np.mean(preds)
-            print(f"{symbol} ensemble prediction: {ensemble_pred:.4f}")
+            preds = [p for p in preds if p is not None and not np.isnan(p) and 0 <= p <= 1]
+            if len(preds) < 3:  # Require at least 3 models for ensemble
+                print(f"Warning: Not enough valid model predictions for {symbol} ({len(preds)}/4), skipping trade")
+                return symbol, None
+            
+            ensemble_pred = np.mean(preds)
+            if not (0 <= ensemble_pred <= 1):
+                print(f"Warning: Invalid ensemble prediction {ensemble_pred} for {symbol}, skipping trade")
+                return symbol, None
+            
+            # Model consensus check - require majority agreement
+            extreme_preds = [p for p in preds if p > 0.7 or p < 0.3]
+            if len(extreme_preds) < len(preds) * 0.6:  # At least 60% of models should agree on direction
+                print(f"Warning: Low model consensus for {symbol}, skipping trade (extreme predictions: {len(extreme_preds)}/{len(preds)})")
+                return symbol, None
 
             # Robust threshold logic: buy > threshold, sell < sell_threshold, hold otherwise
-            sell_threshold = config.get('sell_threshold', 0.30)  # Default lower than buy threshold
+            sell_threshold = adaptive_config.get('sell_threshold', 0.30)  # Default lower than buy threshold
             if ensemble_pred >= prediction_threshold:
                 action = "BUY"
                 print(f"🟢 {symbol}: Prediction {ensemble_pred:.4f} >= threshold {prediction_threshold}, {action} signal!")
@@ -213,25 +283,44 @@ def main():
                 print(f"🟡 {symbol}: Prediction {ensemble_pred:.4f} between thresholds, no trade.")
                 log_prediction(symbol, ensemble_pred, ensemble_pred, action)
 
+            elapsed_time = time.time() - start_time
+            print(f"✅ Completed {symbol} in {elapsed_time:.1f}s")
             return symbol, ensemble_pred
         except Exception as e:
-            print(f"Error processing {symbol}: {e}")
+            elapsed_time = time.time() - start_time
+            print(f"❌ Error processing {symbol} after {elapsed_time:.1f}s: {e}")
             log_error(f"Main processing error for {symbol}: {e}")
             return symbol, None
 
+    # Optimized parallel processing with timeout and progress tracking
     max_workers = min(len(config['symbols']), max(1, os.cpu_count() or 2))
+    print(f"🔄 Processing {len(config['symbols'])} symbols with {max_workers} workers...")
+    
+    completed_symbols = 0
+    failed_symbols = []
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_symbol, symbol, rp_weights): symbol for symbol in config['symbols']}
-        for future in as_completed(futures):
+        futures = {executor.submit(process_symbol, symbol): symbol for symbol in config['symbols']}
+        for future in as_completed(futures, timeout=600):  # 10 minute timeout
             symbol = futures[future]
             try:
-                _sym, _pred = future.result()
+                _sym, _pred = future.result(timeout=120)  # 2 minutes per symbol
+                completed_symbols += 1
+                print(f"✅ Completed {symbol} ({completed_symbols}/{len(config['symbols'])})")
+            except TimeoutError:
+                print(f"⏰ Timeout for {symbol} - skipping to next symbol")
+                failed_symbols.append(symbol)
+                log_error(f"Timeout processing {symbol}")
             except Exception as e:
-                print(f"Unhandled exception in worker for {symbol}: {e}")
+                print(f"❌ Exception for {symbol}: {e}")
+                failed_symbols.append(symbol)
                 log_error(f"Worker exception for {symbol}: {e}")
+    
+    if failed_symbols:
+        print(f"⚠️ {len(failed_symbols)} symbols failed: {failed_symbols}")
+    print(f"✅ Successfully processed {completed_symbols}/{len(config['symbols'])} symbols")
 
     # Portfolio optimization: correlation and risk parity
-    rp_weights = None
     if price_data_dict:
         print("\n📈 Portfolio Correlation Matrix:")
         corr_matrix = risk_manager.compute_correlation_matrix(price_data_dict)
@@ -239,6 +328,8 @@ def main():
         print("\n📊 Risk Parity Weights:")
         rp_weights = risk_manager.risk_parity_weights(price_data_dict)
         print(rp_weights)
+        # Store weights for future use
+        process_symbol._rp_weights = rp_weights
 
     print("\n✅ Bot processing complete!")
 
@@ -282,12 +373,51 @@ def main():
     except Exception as e:
         print(f"Error in advanced risk analytics: {e}")
 
+def adapt_config_by_regime(config, regime_summary):
+    adaptive_config = dict(config)
+    if regime_summary['volatility'] == 'HIGH':
+        adaptive_config['position_size_pct'] = max(5, config.get('position_size_pct', 10) // 2)
+        adaptive_config['stop_loss_percent'] = min(4, config.get('stop_loss_percent', 2) * 2)
+    elif regime_summary['volatility'] == 'LOW':
+        adaptive_config['position_size_pct'] = min(15, config.get('position_size_pct', 10) * 2)
+        adaptive_config['stop_loss_percent'] = max(1, config.get('stop_loss_percent', 2) // 2)
+    if regime_summary['trend'] == 'STRONG_TREND':
+        adaptive_config['take_profit_percent'] = min(10, config.get('take_profit_percent', 5) * 2)
+    elif regime_summary['trend'] == 'SIDEWAYS':
+        adaptive_config['take_profit_percent'] = max(2, config.get('take_profit_percent', 5) // 2)
+        adaptive_config['position_size_pct'] = max(2, config.get('position_size_pct', 10) // 2)
+    return adaptive_config
+
 def execute_live_trade(symbol, action, confidence, risk_manager, binance, config, regime_summary, data):
     """Execute LIVE TRADE with full Binance API integration"""
     try:
-        # Respect live_trading/auto_execute flags
-        if not config.get('live_trading', False) or not config.get('auto_execute', False):
-            log_warning(f"Trading disabled by config. Skipping live trade for {symbol} {action}.")
+        # Respect auto_execute for both live and paper trading
+        if not config.get('auto_execute', False):
+            log_warning(f"Auto execution disabled by config. Skipping trade for {symbol} {action}.")
+            return
+        # Safety checks for live trading
+        is_live_trading = not config.get('paper_trading', False) and config.get('live_trading', False)
+        if is_live_trading:
+            # Additional safety checks for live trading
+            if confidence < 0.6:  # Higher confidence required for live trades
+                log_warning(f"Live trading requires higher confidence. {symbol} {action} confidence: {confidence:.3f} < 0.6")
+                return
+            
+            # Volume check (ensure sufficient volume for execution)
+            try:
+                # Check 24hr volume to ensure liquidity
+                stats = binance.client.futures_24hr_ticker(symbol=symbol)
+                volume_24h = float(stats['volume'])
+                if volume_24h < 100000:  # Minimum volume threshold
+                    log_warning(f"Insufficient 24h volume for {symbol}: {volume_24h}")
+                    return
+            except Exception as e:
+                log_warning(f"Could not verify volume for {symbol}: {e}")
+                return
+        
+        # Only block trades if both live_trading and paper_trading are false
+        if not config.get('live_trading', False) and not config.get('paper_trading', False):
+            log_warning(f"All trading disabled by config. Skipping trade for {symbol} {action}.")
             return
 
         allowed, reason = risk_manager.can_open_new_position(symbol)
@@ -296,17 +426,35 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
             return
         print(f"🚀 EXECUTING LIVE TRADE: {symbol} {action}")
 
-        # Get account balance (paper trading or real)
+        # Get account balance - prioritize paper trading when enabled
         try:
-            balances = binance.get_account_balance()
-            if isinstance(balances, dict) and 'USDT' in balances:
-                # Real Binance API
-                usdt_balance = balances.get('USDT', {}).get('available_balance', 0)
-            else:
-                # Paper trading interface
-                usdt_balance = balances.get('USDT', {}).get('available_balance', 10000.0)
+            # Check if we're in paper trading mode
+            is_paper_trading = config.get('paper_trading', False)
+            balance_before = 0
             
-            print(f"💰 Available USDT balance: {usdt_balance:.2f}")
+            if is_paper_trading:
+                # Get paper trading balance from the paper trading interface
+                balances = binance.get_account_balance()
+                if isinstance(balances, dict) and 'USDT' in balances:
+                    balance_info = balances.get('USDT', {})
+                    usdt_balance = float(balance_info.get('available_balance', 10000.0))
+                    balance_before = usdt_balance
+                else:
+                    # Fallback to direct balance access
+                    usdt_balance = getattr(binance, 'current_balance', 10000.0)
+                    balance_before = usdt_balance
+            else:
+                # Real Binance API
+                balances = binance.get_account_balance()
+                if isinstance(balances, dict) and 'USDT' in balances:
+                    balance_info = balances.get('USDT', {})
+                    usdt_balance = float(balance_info.get('available_balance', 0))
+                    balance_before = usdt_balance
+                else:
+                    usdt_balance = 10000.0
+                    balance_before = usdt_balance
+            
+            print(f"💰 Available USDT balance: {usdt_balance:.2f} ({'Paper Trading' if is_paper_trading else 'Live'})")
 
             if usdt_balance < 10:  # Minimum balance check
                 log_warning(f"Insufficient balance for {symbol}: {usdt_balance} USDT")
@@ -314,13 +462,16 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
 
         except Exception as e:
             log_error(f"Failed to get account balance: {e}")
-            # Use paper trading balance as fallback
-            usdt_balance = 10000.0
-            print(f"⚠️ Using paper trading balance: {usdt_balance} USDT")
+            usdt_balance = 10000.0 if config.get('paper_trading', False) else 0.0
+            balance_before = usdt_balance
+            print(f"⚠️ Using fallback balance: {usdt_balance} USDT")
 
         # Get real-time price
         try:
             current_price = binance.get_current_price(symbol)
+            if current_price is None or np.isnan(current_price) or current_price <= 0:
+                log_error(f"Invalid price received for {symbol}: {current_price}")
+                return
             print(f"📊 Current price for {symbol}: {current_price}")
         except Exception as e:
             log_error(f"Failed to get price for {symbol}: {e}")
@@ -336,10 +487,10 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
             log_error(f"Failed to check position for {symbol}: {e}")
             # Continue anyway for testing
 
-        # Use regime-adaptive config if available
+        # Use regime-adaptive config (use config passed from process_symbol)
         adaptive_config = config.copy()
-        if 'adaptive_config' in locals():
-            adaptive_config = adaptive_config
+        # Apply regime-based adaptations from process_symbol function scope
+        adaptive_config = adapt_config_by_regime(adaptive_config, regime_summary)
 
         # Calculate leverage and position size
         leverage = adaptive_config.get('min_leverage', 3)
@@ -358,64 +509,109 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
             # Continue anyway for testing
 
         # Calculate stop-loss and take-profit
-
         stop_loss = risk_manager.calculate_stop_loss_price(current_price, action, adaptive_config.get('stop_loss_percent', 5))
         take_profit = risk_manager.calculate_take_profit_price(current_price, action, adaptive_config.get('take_profit_percent', 15))
 
-        # Validate stop-loss/take-profit
-        def is_valid_price(p, entry):
-            return p is not None and not np.isnan(p) and p != entry and p > 0
-        if not is_valid_price(stop_loss, current_price):
-            log_warning(f"Invalid stop-loss for {symbol}, using fallback.")
-            stop_loss = current_price * (0.98 if action == 'BUY' else 1.02)
-        if not is_valid_price(take_profit, current_price):
-            log_warning(f"Invalid take-profit for {symbol}, using fallback.")
-            take_profit = current_price * (1.02 if action == 'BUY' else 0.98)
+        # Enhanced validation for stop-loss/take-profit
+        def is_valid_stop_loss(p, entry, action):
+            if p is None or np.isnan(p) or p <= 0:
+                return False
+            if action == 'BUY':
+                return p < entry  # Stop loss must be below entry for BUY
+            elif action == 'SELL':
+                return p > entry  # Stop loss must be above entry for SELL
+            return False
+            
+        def is_valid_take_profit(p, entry, action):
+            if p is None or np.isnan(p) or p <= 0:
+                return False
+            if action == 'BUY':
+                return p > entry  # Take profit must be above entry for BUY
+            elif action == 'SELL':
+                return p < entry  # Take profit must be below entry for SELL
+            return False
+            
+        if not is_valid_stop_loss(stop_loss, current_price, action):
+            log_warning(f"Invalid stop-loss for {symbol}: {stop_loss}, using fallback.")
+            stop_loss_pct = adaptive_config.get('stop_loss_percent', 2) / 100.0
+            stop_loss = current_price * (1 - stop_loss_pct if action == 'BUY' else 1 + stop_loss_pct)
+            
+        if not is_valid_take_profit(take_profit, current_price, action):
+            log_warning(f"Invalid take-profit for {symbol}: {take_profit}, using fallback.")
+            take_profit_pct = adaptive_config.get('take_profit_percent', 5) / 100.0
+            take_profit = current_price * (1 + take_profit_pct if action == 'BUY' else 1 - take_profit_pct)
+            
+        # Final validation - ensure stop loss and take profit are reasonable
+        if action == 'BUY':
+            if stop_loss >= current_price:
+                stop_loss = current_price * 0.98  # 2% below current price
+                log_warning(f"Adjusted stop-loss for BUY {symbol} to {stop_loss}")
+            if take_profit <= current_price:
+                take_profit = current_price * 1.03  # 3% above current price
+                log_warning(f"Adjusted take-profit for BUY {symbol} to {take_profit}")
+        else:  # SELL
+            if stop_loss <= current_price:
+                stop_loss = current_price * 1.02  # 2% above current price
+                log_warning(f"Adjusted stop-loss for SELL {symbol} to {stop_loss}")
+            if take_profit >= current_price:
+                take_profit = current_price * 0.97  # 3% below current price
+                log_warning(f"Adjusted take-profit for SELL {symbol} to {take_profit}")
 
         print(f"🛑 Stop-loss: {stop_loss}")
         print(f" Take-profit: {take_profit}")
 
         # Advanced order management with regime-based execution
         order_bundle = None
-        start_time = time.time()
-        # Use VWAP for high volume regime
-        if regime_summary.get('volume', 'NORMAL') == 'HIGH':
-            order_bundle = binance.execute_vwap(symbol, action, position_size, data, order_type='MARKET')
-            print(f"VWAP execution used for {symbol}")
-        # Use TWAP for low volatility regime
-        elif regime_summary.get('volatility', 'NORMAL') == 'LOW':
-            order_bundle = binance.execute_twap(symbol, action, position_size, intervals=3, interval_sec=5, order_type='MARKET')
-            print(f"TWAP execution used for {symbol}")
-        # Use smart order routing for strong trend
-        elif regime_summary.get('trend', 'NORMAL') == 'STRONG_TREND':
-            order_bundle = binance.smart_order_routing(symbol, action, position_size, order_type='MARKET', price=current_price)
-            print(f"Smart order routing used for {symbol}")
-        # Use trailing stop for strong take profit config
-        elif adaptive_config.get('take_profit_percent', 5) >= 8:
-            activation_price = current_price * 1.01 if action == 'BUY' else current_price * 0.99
-            callback_rate = 1.0
-            order_bundle = binance.place_trailing_stop_order(symbol, action, position_size, activation_price, callback_rate)
-            print(f"Trailing stop order used for {symbol}")
-        # Use OCO for sideways regime
-        elif regime_summary.get('trend', 'NORMAL') == 'SIDEWAYS' or adaptive_config.get('take_profit_percent', 5) <= 3:
-            stop_limit_price = stop_loss
-            order_bundle = binance.place_oco_order(symbol, action, position_size, take_profit, stop_loss, stop_limit_price)
-            print(f"OCO order used for {symbol}")
-        # Use scaled orders for large positions
-        elif position_size > 2:
-            price_levels = [(current_price * (1 + 0.002 * i), position_size / 3) for i in range(3)]
-            order_bundle = binance.place_scaled_orders(symbol, action, position_size, price_levels)
-            print(f"Scaled orders used for {symbol}")
-        else:
-            order_bundle = binance.place_futures_order(
-                symbol=symbol,
-                side=action,
-                quantity=position_size,
-                stop_loss=stop_loss,
-                take_profit=take_profit
-            )
-            print(f"Regular order used for {symbol}")
+        try:
+            # Use VWAP for high volume regime
+            if regime_summary.get('volume', 'NORMAL') == 'HIGH':
+                order_bundle = binance.execute_vwap(symbol, action, position_size, data, order_type='MARKET')
+                print(f"VWAP execution used for {symbol}")
+            # Use TWAP for low volatility regime
+            elif regime_summary.get('volatility', 'NORMAL') == 'LOW':
+                order_bundle = binance.execute_twap(symbol, action, position_size, intervals=3, interval_sec=5, order_type='MARKET')
+                print(f"TWAP execution used for {symbol}")
+            # Use smart order routing for strong trend
+            elif regime_summary.get('trend', 'NORMAL') == 'STRONG_TREND':
+                order_bundle = binance.smart_order_routing(symbol, action, position_size, order_type='MARKET', price=current_price)
+                print(f"Smart order routing used for {symbol}")
+            # Use trailing stop for strong take profit config
+            elif adaptive_config.get('take_profit_percent', 5) >= 8:
+                activation_price = current_price * 1.01 if action == 'BUY' else current_price * 0.99
+                callback_rate = 1.0
+                order_bundle = binance.place_trailing_stop_order(symbol, action, position_size, activation_price, callback_rate)
+                print(f"Trailing stop order used for {symbol}")
+            # Use OCO for sideways regime
+            elif regime_summary.get('trend', 'NORMAL') == 'SIDEWAYS' or adaptive_config.get('take_profit_percent', 5) <= 3:
+                stop_limit_price = stop_loss
+                order_bundle = binance.place_oco_order(symbol, action, position_size, take_profit, stop_loss, stop_limit_price)
+                print(f"OCO order used for {symbol}")
+            # Use scaled orders for large positions
+            elif position_size > 2:
+                price_levels = [(current_price * (1 + 0.002 * i), position_size / 3) for i in range(3)]
+                order_bundle = binance.place_scaled_orders(symbol, action, position_size, price_levels)
+                print(f"Scaled orders used for {symbol}")
+            else:
+                order_bundle = binance.place_futures_order(
+                    symbol=symbol,
+                    side=action,
+                    quantity=position_size,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit
+                )
+                print(f"Regular order used for {symbol}")
 
+            # Standardized order_bundle handling
+            if order_bundle is None or not isinstance(order_bundle, dict) or 'main' not in order_bundle:
+                print(f"Order execution failed for {symbol}, skipping position tracking.")
+                return
+            main_order = order_bundle['main']
+
+        except Exception as e:
+            log_error(f"Order execution failed for {symbol}: {e}")
+            return
+
+        start_time = time.time()
         end_time = time.time()
         binance.log_latency(start_time, end_time)
         # Slippage analysis (if order_bundle and current_price available)
@@ -423,9 +619,6 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
             binance.analyze_slippage(symbol, current_price, order_bundle.get('main', order_bundle))
 
         # Add to position tracking
-        main_order = order_bundle if isinstance(order_bundle, dict) else {'orderId': 'N/A'}
-        if isinstance(order_bundle, dict) and 'main' in order_bundle:
-            main_order = order_bundle['main']
         print(f"✅ Order placed successfully: {main_order.get('orderId', 'N/A')}")
         risk_manager.add_position(
             symbol=symbol,
@@ -442,6 +635,62 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
             }
         )
         log_trade(symbol, action, current_price, position_size)
+        
+        # Log comprehensive trade data to trades.csv
+        try:
+            # Get updated balance after trade (for paper trading, get from paper trader)
+            if is_paper_trading:
+                # Get actual paper trading balance
+                paper_balance_info = binance.get_account_balance()
+                if isinstance(paper_balance_info, dict) and 'USDT' in paper_balance_info:
+                    balance_after = float(paper_balance_info['USDT'].get('available_balance', balance_before))
+                else:
+                    balance_after = binance.current_balance  # Direct access to paper trader balance
+            else:
+                # Real trading balance
+                balances_after = binance.get_account_balance()
+                if isinstance(balances_after, dict) and 'USDT' in balances_after:
+                    balance_info = balances_after.get('USDT', {})
+                    balance_after = float(balance_info.get('available_balance', balance_before))
+                else:
+                    balance_after = balance_before
+            
+            # Calculate P&L (for paper trading, this should be 0 for opening trades)
+            if is_paper_trading:
+                # Opening a position shouldn't show immediate P&L
+                pnl = 0.0
+                pnl_pct = 0.0
+            else:
+                pnl = balance_after - balance_before
+                pnl_pct = (pnl / balance_before * 100) if balance_before > 0 else 0
+            
+            log_paper_trade(
+                symbol=symbol,
+                action=action,
+                price=current_price,
+                quantity=position_size,
+                total_value=current_price * position_size,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                position_size=position_size,
+                leverage=leverage,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                prediction=confidence,
+                confidence=confidence,
+                regime=regime_summary,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                trade_type='paper' if config.get('paper_trading', False) else 'live',
+                status='executed',
+                order_id=str(main_order.get('orderId', ''))
+            )
+            
+            print(f"📊 Trade logged to trades.csv for {symbol}")
+            
+        except Exception as e:
+            log_error(f"Error logging trade to CSV: {e}")
+        
         print(f"💰 LIVE TRADE EXECUTED: {symbol} {action} | Size: {position_size:.6f} | Leverage: {leverage}x")
         print(f"🎯 Trade executed successfully! Monitor position for exit signals.")
 

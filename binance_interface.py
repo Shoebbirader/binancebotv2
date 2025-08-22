@@ -15,10 +15,12 @@ class BinanceInterface:
     def _rate_limit(self):
         """Enforce API rate limiting for all calls"""
         current_time = time.time() * 1000
-        time_since_last = current_time - getattr(self, 'last_request_time', 0)
+        last_time = getattr(self, 'last_request_time', 0)
+        time_since_last = current_time - last_time
         min_interval = 120  # ms, adjust as needed
-        if time_since_last < min_interval:
-            time.sleep((min_interval - time_since_last) / 1000)
+        if last_time > 0 and time_since_last < min_interval:
+            sleep_time = (min_interval - time_since_last) / 1000
+            time.sleep(sleep_time)
         self.last_request_time = time.time() * 1000
 
     def smart_order_routing(self, symbol, side, quantity, order_type='MARKET', price=None):
@@ -91,8 +93,7 @@ class BinanceInterface:
                 type='TRAILING_STOP_MARKET',
                 quantity=quantity,
                 activationPrice=activation_price,
-                callbackRate=callback_rate,
-                reduceOnly=True
+                callbackRate=callback_rate
             )
             logging.info(f"Trailing stop order placed: {order}")
             return order
@@ -100,7 +101,7 @@ class BinanceInterface:
             logging.error(f"Failed to place trailing stop order: {e}")
             return None
 
-    def place_oco_order(self, symbol, side, quantity, price, stop_price, stop_limit_price):
+    def place_oco_order(self, symbol, side, quantity, take_profit, stop_loss, stop_limit_price):
         self._rate_limit()
         """
         Place an OCO (One-Cancels-Other) order (Binance Spot only, demo for Futures).
@@ -112,7 +113,7 @@ class BinanceInterface:
                 side=side,
                 type='LIMIT',
                 quantity=quantity,
-                price=price,
+                price=take_profit,
                 timeInForce='GTC'
             )
             stop_order = self.client.futures_create_order(
@@ -120,7 +121,7 @@ class BinanceInterface:
                 side=side,
                 type='STOP_MARKET',
                 quantity=quantity,
-                stopPrice=stop_price,
+                stopPrice=stop_loss,
                 price=stop_limit_price,
                 reduceOnly=True
             )
@@ -220,6 +221,13 @@ class BinanceInterface:
                     available_balance = float(balance.get('availableBalance', 0))
                     unrealized_pnl = float(balance.get('unrealizedPnl', 0))
                     
+                    # Validate numeric values
+                    if (np.isnan(wallet_balance) or np.isinf(wallet_balance) or
+                        np.isnan(available_balance) or np.isinf(available_balance) or
+                        np.isnan(unrealized_pnl) or np.isinf(unrealized_pnl)):
+                        logging.warning(f"Invalid balance values for {balance['asset']}")
+                        continue
+                    
                     if wallet_balance > 0:
                         balances[balance['asset']] = {
                             'wallet_balance': wallet_balance,
@@ -253,28 +261,58 @@ class BinanceInterface:
         return filters
 
     def format_quantity(self, symbol, quantity):
-        self._rate_limit()
         """Round quantity to the allowed step size and min qty."""
-        filters = self.get_symbol_filters(symbol)
-        lot = filters.get('LOT_SIZE', {})
-        step = float(lot.get('stepSize', '0.001'))
-        min_qty = float(lot.get('minQty', '0.0'))
-        # Round down to step size
-        qty = max(quantity - (quantity % step), min_qty)
-        # Ensure proper decimals by formatting against step
-        decimals = max(0, str(step)[::-1].find('.'))
-        return float(f"{qty:.{decimals}f}")
+        try:
+            self._rate_limit()
+            filters = self.get_symbol_filters(symbol)
+            lot = filters.get('LOT_SIZE', {})
+            step = float(lot.get('stepSize', '0.001'))
+            min_qty = float(lot.get('minQty', '0.0'))
+            
+            # Validate inputs
+            if np.isnan(quantity) or np.isinf(quantity) or quantity <= 0:
+                return min_qty
+                
+            # Round down to step size
+            qty = max(quantity - (quantity % step), min_qty)
+            # Ensure proper decimals by formatting against step
+            decimals = max(0, str(step)[::-1].find('.'))
+            formatted_qty = float(f"{qty:.{decimals}f}")
+            
+            # Final validation
+            if np.isnan(formatted_qty) or np.isinf(formatted_qty):
+                return min_qty
+                
+            return formatted_qty
+        except Exception as e:
+            logging.error(f"Error formatting quantity for {symbol}: {e}")
+            return 0.001  # Safe fallback
 
     def format_price(self, symbol, price):
-        self._rate_limit()
         """Round price to tick size."""
-        filters = self.get_symbol_filters(symbol)
-        pf = filters.get('PRICE_FILTER', {})
-        tick = float(pf.get('tickSize', '0.01'))
-        decimals = max(0, str(tick)[::-1].find('.'))
-        # Round to nearest tick down
-        p = price - (price % tick)
-        return float(f"{p:.{decimals}f}")
+        try:
+            self._rate_limit()
+            filters = self.get_symbol_filters(symbol)
+            pf = filters.get('PRICE_FILTER', {})
+            tick = float(pf.get('tickSize', '0.01'))
+            
+            # Validate inputs
+            if np.isnan(price) or np.isinf(price) or price <= 0:
+                return None
+                
+            decimals = max(0, str(tick)[::-1].find('.'))
+            # Round to nearest tick down
+            p = price - (price % tick)
+            formatted_price = float(f"{p:.{decimals}f}")
+            
+            # Final validation
+            if np.isnan(formatted_price) or np.isinf(formatted_price):
+                return None
+                
+            return formatted_price
+        except Exception as e:
+            logging.error(f"Error formatting price for {symbol}: {e}")
+            return None
     
 
 
@@ -282,23 +320,19 @@ class BinanceInterface:
         self._rate_limit()
         """Get real-time price for a symbol with rate limiting and NaN handling"""
         try:
-            self._rate_limit()
-            ticker = self.client.futures_symbol_ticker(symbol=symbol)
-            price = float(ticker['price'])
-            import math
-            if math.isnan(price) or price <= 0:
-                logging.warning(f"Invalid price received for {symbol}: {price}")
-                return None
-            logging.info(f"Current price for {symbol}: {price}")
-            return price
+            price = self.client.futures_mark_price(symbol=symbol)
+            price_value = float(price['markPrice'])
             
-        except BinanceAPIException as e:
-            logging.error(f"Binance API error getting price for {symbol}: {e}")
-            return None
+            # Validate the price
+            if np.isnan(price_value) or np.isinf(price_value) or price_value <= 0:
+                logging.warning(f"Invalid price received for {symbol}: {price_value}")
+                return None
+                
+            return price_value
+            
         except Exception as e:
-            logging.error(f"Unexpected error getting price for {symbol}: {e}")
+            logging.error(f"Error getting current price for {symbol}: {e}")
             return None
-    
     def get_position_info(self, symbol):
         self._rate_limit()
         """Get current position information"""

@@ -78,26 +78,23 @@ class RiskManager:
     def calculate_position_size(self, balance, current_price, leverage):
         """Calculate position size based on risk management with proper leverage accounting"""
         try:
-            # Calculate actual position value based on risk per trade
+            # Calculate risk amount per trade (not adjusted by leverage)
             risk_amount = balance * (self.max_loss_pct / 100.0)
             
-            # Calculate position size in USDT
+            # Calculate position value in USDT based on risk and stop loss
             position_value_usdt = risk_amount * (100.0 / self.stop_loss_percent)
             
             # Apply position size percentage limit
-            max_position_usdt = balance * (self.position_size_pct / 100.0)
+            max_position_usdt = balance * (self.position_size_pct / 100.0) * leverage
             position_value_usdt = min(position_value_usdt, max_position_usdt)
             
-            # Convert to quantity
+            # Convert to quantity (this is the actual quantity we'll trade)
             quantity = position_value_usdt / current_price
             
-            # Apply leverage (position size / leverage = margin required)
-            leveraged_quantity = quantity * leverage
-            
             # Ensure minimum quantity
-            final_qty = max(round(leveraged_quantity, 3), 0.001)
+            final_qty = max(round(quantity, 6), 0.001)
             
-            logging.info(f"Position size: {final_qty:.6f} @ ${current_price:.2f} (Risk: ${risk_amount:.2f}, Leverage: {leverage}x)")
+            logging.info(f"Position size: {final_qty:.6f} @ ${current_price:.2f} (Risk: ${risk_amount:.2f}, Position Value: ${position_value_usdt:.2f}, Leverage: {leverage}x)")
             return final_qty
             
         except Exception as e:
@@ -200,12 +197,15 @@ class RiskManager:
             logging.error(f"Error adding position: {e}")
     
     def update_position(self, symbol, current_price):
-        """Update position and check for exit signals"""
+        """Update position and check for exit signals with proper thread safety"""
         try:
             with self._lock:
                 if symbol not in self.active_positions:
                     return None, None
+                # Create a complete copy to avoid race conditions
                 position = dict(self.active_positions[symbol])
+                
+            # Work with the copy outside the lock to avoid deadlocks
             entry_price = position['entry_price']
             side = position['side']
             
@@ -226,7 +226,7 @@ class RiskManager:
             return None, None
     
     def close_position_tracking(self, symbol, exit_price, exit_reason):
-        """Close position in tracking"""
+        """Close position in tracking with all modifications inside the lock"""
         try:
             with self._lock:
                 if symbol in self.active_positions:
@@ -235,21 +235,16 @@ class RiskManager:
                     position['exit_time'] = datetime.now()
                     position['exit_reason'] = exit_reason
                     position['status'] = 'CLOSED'
-                    
                     # Calculate P&L
                     if position['side'] == 'BUY':
                         pnl_pct = (exit_price - position['entry_price']) / position['entry_price'] * 100
                     else:
                         pnl_pct = (position['entry_price'] - exit_price) / position['entry_price'] * 100
-                    
                     position['pnl_pct'] = pnl_pct
-                    
-                    # Move to history
-                    self.position_history.append(position)
+                    # Move a copy to history to avoid future mutation
+                    self.position_history.append(dict(position))
                     del self.active_positions[symbol]
-                
-                logging.info(f"Position closed: {symbol} {exit_reason} P&L: {pnl_pct:.2f}%")
-                
+                    logging.info(f"Position closed: {symbol} {exit_reason} P&L: {pnl_pct:.2f}%")
         except Exception as e:
             logging.error(f"Error closing position tracking: {e}")
     

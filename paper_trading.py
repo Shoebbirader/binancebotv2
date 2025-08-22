@@ -3,6 +3,7 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import numpy as np
+import threading
 
 class PaperTradingInterface:
     """
@@ -18,32 +19,59 @@ class PaperTradingInterface:
         self.trade_history: List[Dict] = []
         self.current_prices: Dict[str, float] = {}
         self.pnl_history: List[float] = []
-        
+        self._lock = threading.Lock()
         logging.info(f"Paper trading initialized with ${initial_balance:.2f} USDT")
     
     def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Simulate setting leverage"""
-        logging.info(f"Paper trading: Leverage set to {leverage}x for {symbol}")
+        """Simulate setting leverage in a thread-safe way"""
+        with self._lock:
+            if not hasattr(self, '_leverage_map'):
+                self._leverage_map = {}
+            self._leverage_map[symbol] = leverage
+            logging.info(f"Paper trading: Leverage set to {leverage}x for {symbol}")
         return True
     
     def get_account_balance(self) -> Dict[str, Dict]:
         """Get simulated account balance"""
-        return {
-            'USDT': {
-                'available_balance': self.current_balance,
-                'total_balance': self.current_balance
+        with self._lock:
+            return {
+                'USDT': {
+                    'available_balance': self.current_balance,
+                    'wallet_balance': self.current_balance,
+                    'total_balance': self.current_balance,
+                    'unrealized_pnl': sum([pos.get('unrealized_pnl', 0) for pos in self.positions.values()])
+                }
             }
-        }
     
     def get_current_price(self, symbol: str) -> Optional[float]:
-        """Get current price (simulated); fallback to random price if missing"""
-        price = self.current_prices.get(symbol)
-        if price is None:
-            # Fallback: simulate price between 10 and 100
-            price = float(np.random.uniform(10, 100))
+        """Get current price from Binance API for paper trading"""
+        try:
+            # For paper trading, we should still use real market prices
+            from binance.client import Client
+            import os
+            if not hasattr(self, '_binance_client'):
+                self._binance_client = Client(os.getenv('BINANCE_API_KEY'), os.getenv('BINANCE_API_SECRET'))
+            
+            # Get real price from Binance
+            ticker = self._binance_client.futures_mark_price(symbol=symbol)
+            price = float(ticker['markPrice'])
+            
+            # Validate price
+            if np.isnan(price) or np.isinf(price) or price <= 0:
+                logging.error(f"Invalid real price for {symbol}: {price}")
+                return None
+                
             self.current_prices[symbol] = price
-            logging.warning(f"No price available for {symbol}, using simulated price: {price:.2f}")
-        return price
+            return price
+            
+        except Exception as e:
+            logging.error(f"Failed to get real price for {symbol}: {e}")
+            # Only use fallback if real price fails
+            price = self.current_prices.get(symbol)
+            if price is None:
+                logging.warning(f"No cached price for {symbol}, paper trading may be inaccurate")
+                return None
+            return price
     
     def update_prices(self, prices: Dict[str, float]):
         """Update current prices for simulation"""
@@ -73,16 +101,23 @@ class PaperTradingInterface:
                           stop_loss: Optional[float] = None, 
                           take_profit: Optional[float] = None) -> Dict:
         """Simulate placing a futures order"""
-        try:
+        with self._lock:
             if symbol not in self.current_prices:
                 raise ValueError(f"No price available for {symbol}")
-            
             current_price = self.current_prices[symbol]
             order_value = quantity * current_price
+            # Get leverage from the leverage map if available, otherwise use 1
+            leverage = getattr(self, '_leverage_map', {}).get(symbol, 1)
+            margin_required = order_value / leverage
             
-            # Check if we have enough balance
-            if order_value > self.current_balance * 10:  # Allow up to 10x leverage
-                raise ValueError("Insufficient balance")
+            if margin_required > self.current_balance:
+                raise ValueError(f"Insufficient paper trading balance: {self.current_balance:.2f} USDT for margin required {margin_required:.2f}")
+            
+            # For paper trading, we only need to reserve the margin, not the full order value
+            self.current_balance -= margin_required
+            position_margin = margin_required
+            
+            logging.info(f"Paper Trade: Reserved ${margin_required:.2f} margin (${leverage}x leverage), Remaining balance: ${self.current_balance:.2f}")
             
             # Create order
             order = {
@@ -92,7 +127,8 @@ class PaperTradingInterface:
                 'price': current_price,
                 'orderId': f"paper_{int(time.time() * 1000)}",
                 'status': 'FILLED',
-                'time': datetime.now().isoformat()
+                'time': datetime.now().isoformat(),
+                'entry_price': current_price
             }
             
             # Create position
@@ -101,111 +137,131 @@ class PaperTradingInterface:
                 'side': 'LONG' if side == 'BUY' else 'SHORT',
                 'quantity': quantity,
                 'entry_price': current_price,
-                'leverage': 1,  # Default leverage
+                'leverage': leverage,
+                'margin_used': position_margin,
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
-                'entry_time': datetime.now(),
                 'unrealized_pnl': 0.0
             }
             
             self.order_history.append(order)
             logging.info(f"Paper trade: {side} {quantity} {symbol} @ ${current_price:.4f}")
-            
+            # Log to CSV
+            self._log_trade_csv(order)
             return {
                 'main': order,
                 'sl': {'orderId': f"sl_{order['orderId']}"} if stop_loss else None,
                 'tp': {'orderId': f"tp_{order['orderId']}"} if take_profit else None
             }
-            
-        except Exception as e:
-            logging.error(f"Paper trading order failed: {e}")
-            raise
     
     def close_position(self, symbol: str, side: str, quantity: float) -> Dict:
-        """Simulate closing a position"""
-        if symbol not in self.positions:
-            raise ValueError(f"No position found for {symbol}")
-        
-        position = self.positions[symbol]
-        current_price = self.current_prices.get(symbol)
-        
-        if current_price is None:
-            raise ValueError(f"No price available for {symbol}")
-        
-        # Calculate P&L
-        if position['side'] == 'LONG':
-            pnl = (current_price - position['entry_price']) * position['quantity']
-        else:  # SHORT
-            pnl = (position['entry_price'] - current_price) * position['quantity']
-        
-        # Update balance
-        self.current_balance += pnl
-        
-        # Record trade
-        trade = {
-            'symbol': symbol,
-            'side': 'SELL' if position['side'] == 'LONG' else 'BUY',
-            'quantity': quantity,
-            'entry_price': position['entry_price'],
-            'exit_price': current_price,
-            'pnl': pnl,
-            'exit_time': datetime.now().isoformat()
-        }
-        
-        self.trade_history.append(trade)
-        del self.positions[symbol]
-        self.pnl_history.append(pnl)
-        
-        logging.info(f"Paper trade closed: {symbol} P&L: ${pnl:.4f}, Balance: ${self.current_balance:.2f}")
-        
-        return {'orderId': f"close_{int(time.time() * 1000)}", 'status': 'FILLED'}
-    
-    def cancel_all_open_orders(self, symbol: str) -> bool:
-        """Simulate canceling all open orders"""
-        logging.info(f"Paper trading: Canceling all orders for {symbol}")
-        return True
-    
-    def get_account_info(self) -> Dict:
-        """Get comprehensive account information"""
-        total_unrealized_pnl = sum(pos['unrealized_pnl'] for pos in self.positions.values())
-        
-        return {
-            'balance': self.current_balance,
-            'initial_balance': self.initial_balance,
-            'total_pnl': self.current_balance - self.initial_balance,
-            'total_pnl_pct': ((self.current_balance - self.initial_balance) / self.initial_balance) * 100,
-            'active_positions': len(self.positions),
-            'total_trades': len(self.trade_history),
-            'unrealized_pnl': total_unrealized_pnl,
-            'positions': list(self.positions.values()),
-            'trade_history': self.trade_history[-10:]  # Last 10 trades
-        }
+        """Simulate closing a position with thread safety"""
+        with self._lock:
+            if symbol not in self.positions:
+                raise ValueError(f"No position found for {symbol}")
+            position = self.positions[symbol]
+            current_price = self.current_prices.get(symbol)
+            if current_price is None:
+                raise ValueError(f"No price available for {symbol}")
+            # Calculate P&L with leverage
+            if position['side'] == 'LONG':
+                pnl = (current_price - position['entry_price']) * position['quantity'] * position.get('leverage', 1)
+            else:
+                pnl = (position['entry_price'] - current_price) * position['quantity'] * position.get('leverage', 1)
+            # Return margin to balance and add/subtract P&L
+            margin_used = position.get('margin_used', (position['entry_price'] * position['quantity']) / position.get('leverage', 1))
+            self.current_balance += margin_used + pnl
+            # Record trade
+            trade = {
+                'symbol': symbol,
+                'side': 'SELL' if position['side'] == 'LONG' else 'BUY',
+                'quantity': position['quantity'],
+                'entry_price': position['entry_price'],
+                'exit_price': current_price,
+                'pnl': pnl,
+                'exit_time': datetime.now().isoformat()
+            }
+            self.trade_history.append(trade)
+            del self.positions[symbol]
+            self.pnl_history.append(pnl)
+            logging.info(f"Paper trade closed: {symbol} P&L: ${pnl:.4f}, Balance: ${self.current_balance:.2f}")
+            self._log_trade_csv(trade)
+            return {'orderId': f"close_{int(time.time() * 1000)}", 'status': 'FILLED'}
     
     def _update_position_pnl(self, symbol: str, current_price: float):
-        """Update unrealized P&L for active positions"""
-        if symbol in self.positions:
-            position = self.positions[symbol]
+        """Update unrealized P&L for active positions with thread safety"""
+        # First check if position exists without holding lock too long
+        if symbol not in self.positions:
+            return
             
-            if position['side'] == 'LONG':
-                pnl = (current_price - position['entry_price']) * position['quantity']
-            else:  # SHORT
-                pnl = (position['entry_price'] - current_price) * position['quantity']
+        # Get position info atomically
+        with self._lock:
+            if symbol not in self.positions:
+                return
+            position = dict(self.positions[symbol])  # Create copy to work with
             
-            position['unrealized_pnl'] = pnl
+        # Calculate P&L outside of lock
+        if position['side'] == 'LONG':
+            pnl = (current_price - position['entry_price']) * position['quantity'] * position.get('leverage', 1)
+        else:
+            pnl = (position['entry_price'] - current_price) * position['quantity'] * position.get('leverage', 1)
             
-            # Check stop loss and take profit
-            if position.get('stop_loss') and position['side'] == 'LONG' and current_price <= position['stop_loss']:
+        # Update P&L atomically
+        with self._lock:
+            if symbol in self.positions:
+                self.positions[symbol]['unrealized_pnl'] = pnl
+                
+        # Check exit conditions and close if needed (this calls close_position which has its own lock)
+        if position.get('stop_loss'):
+            if position['side'] == 'LONG' and current_price <= position['stop_loss']:
                 self.close_position(symbol, 'SELL', position['quantity'])
                 logging.info(f"Paper trading: Stop loss triggered for {symbol}")
-            elif position.get('stop_loss') and position['side'] == 'SHORT' and current_price >= position['stop_loss']:
+            elif position['side'] == 'SHORT' and current_price >= position['stop_loss']:
                 self.close_position(symbol, 'BUY', position['quantity'])
                 logging.info(f"Paper trading: Stop loss triggered for {symbol}")
-            elif position.get('take_profit') and position['side'] == 'LONG' and current_price >= position['take_profit']:
+                
+        if position.get('take_profit'):
+            if position['side'] == 'LONG' and current_price >= position['take_profit']:
                 self.close_position(symbol, 'SELL', position['quantity'])
                 logging.info(f"Paper trading: Take profit triggered for {symbol}")
-            elif position.get('take_profit') and position['side'] == 'SHORT' and current_price <= position['take_profit']:
+            elif position['side'] == 'SHORT' and current_price <= position['take_profit']:
                 self.close_position(symbol, 'BUY', position['quantity'])
                 logging.info(f"Paper trading: Take profit triggered for {symbol}")
+
+    def log_latency(self, start_time, end_time):
+        """Simulate latency logging for paper trading"""
+        latency_ms = (end_time - start_time) * 1000
+        logging.info(f"Paper trading simulated latency: {latency_ms:.2f} ms")
+        return latency_ms
+
+    def analyze_slippage(self, symbol, expected_price, executed_order):
+        """Simulate slippage analysis for paper trading"""
+        logging.info(f"Paper trading: No slippage for {symbol} (simulated execution)")
+        return 0
+
+    def _log_trade_csv(self, trade_dict):
+        """Disabled - CSV logging handled by main logger to avoid conflicts"""
+        pass
+
+    # Advanced order execution stubs
+    def execute_vwap(self, symbol, side, quantity, data, order_type='MARKET'):
+        return self.place_futures_order(symbol, side, quantity)
+    def execute_twap(self, symbol, side, quantity, intervals=3, interval_sec=5, order_type='MARKET'):
+        return self.place_futures_order(symbol, side, quantity)
+    def smart_order_routing(self, symbol, side, quantity, order_type='MARKET', price=None):
+        return self.place_futures_order(symbol, side, quantity)
+    def place_trailing_stop_order(self, symbol, side, quantity, activation_price, callback_rate):
+        return self.place_futures_order(symbol, side, quantity)
+    def place_oco_order(self, symbol, side, quantity, take_profit, stop_loss, stop_limit_price):
+        return self.place_futures_order(symbol, side, quantity)
+    def place_scaled_orders(self, symbol, side, total_quantity, price_levels):
+        orders = []
+        for price, qty in price_levels:
+            order = self.place_futures_order(symbol, side, qty)
+            if order and 'main' in order and order['main']:
+                order['main']['price'] = price
+            orders.append(order['main'] if order and 'main' in order else None)
+        return {'main': orders[0] if orders else None, 'scaled': orders}
 
 # Global paper trading instance
 paper_trader = None

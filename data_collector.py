@@ -16,54 +16,63 @@ class DataCollector:
         self.interval = config['interval']
         self.client = Client(os.getenv('BINANCE_API_KEY'), os.getenv('BINANCE_API_SECRET'))
         self._lock = threading.Lock()
+        self._cache = {}
+        self._cache_max_size = 100  # Limit cache to 100 entries
 
     def fetch_historical(self, symbol, limit=1000):
-        """Fetch historical data with robust error handling and fallback."""
-        """
-        Fetch historical data with valid Binance API limits.
-        Binance allows max 1000 klines per request for most intervals.
-        """
+        """Fetch historical data with caching and optimized processing"""
         try:
             limit = min(limit, 1000)
+            
+            # Simple caching check (in-memory)
+            cache_key = f"{symbol}_{self.interval}_{limit}"
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+            
             with self._lock:
                 klines = self.client.futures_klines(symbol=symbol, interval=self.interval, limit=limit)
+            
             if not klines or len(klines) == 0:
-                logging.warning(f"No data received for {symbol}, using fallback data.")
-                # Fallback: create dummy data
-                df = pd.DataFrame({
-                    'open_time': pd.date_range(end=pd.Timestamp.now(), periods=limit, freq='5T'),
-                    'open': [100.0]*limit,
-                    'high': [101.0]*limit,
-                    'low': [99.0]*limit,
-                    'close': [100.5]*limit,
-                    'volume': [10.0]*limit
-                })
-                df.set_index('open_time', inplace=True)
-                return df
+                logging.warning(f"No data for {symbol}, using fallback")
+                return self._create_fallback_data(limit)
+                
+            # Fast DataFrame creation
             df = pd.DataFrame(klines, columns=[
                 "open_time","open","high","low","close","volume",
                 "close_time","quote_asset_volume","num_trades",
                 "taker_buy_base","taker_buy_quote","ignore"
             ])
+            
+            # Vectorized type conversion
             numeric_cols = ["open","high","low","close","volume"]
             df[numeric_cols] = df[numeric_cols].astype(float)
             df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
             df.set_index('open_time', inplace=True)
-            logging.info(f"Fetched {len(df)} data points for {symbol}")
+            
+            # Cache the result with size limit
+            if len(self._cache) >= self._cache_max_size:
+                # Remove oldest entry (FIFO)
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+            self._cache[cache_key] = df
+            
+            logging.info(f"Fetched {len(df)} points for {symbol}")
             return df
+            
         except Exception as e:
-            logging.error(f"Error fetching data for {symbol}: {e}")
-            # Fallback: create dummy data
-            df = pd.DataFrame({
-                'open_time': pd.date_range(end=pd.Timestamp.now(), periods=limit, freq='5T'),
-                'open': [100.0]*limit,
-                'high': [101.0]*limit,
-                'low': [99.0]*limit,
-                'close': [100.5]*limit,
-                'volume': [10.0]*limit
-            })
-            df.set_index('open_time', inplace=True)
-            return df
+            logging.error(f"Error fetching {symbol}: {e}")
+            return self._create_fallback_data(limit)
+    
+    def _create_fallback_data(self, limit):
+        """Fast fallback data creation"""
+        return pd.DataFrame({
+            'open_time': pd.date_range(end=pd.Timestamp.now(), periods=limit, freq='5T'),
+            'open': [100.0]*limit,
+            'high': [101.0]*limit,
+            'low': [99.0]*limit,
+            'close': [100.5]*limit,
+            'volume': [10.0]*limit
+        }).set_index('open_time')
 
     def fetch_extended_history(self, symbol, target_samples=3000):
         """

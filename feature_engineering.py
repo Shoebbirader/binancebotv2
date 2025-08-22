@@ -126,274 +126,87 @@ def _compute_cmf(high, low, close, volume, window=20):
 
 def engineer_features(df):
     """
-    Enhanced feature engineering with 40+ predictive features
-    Fixed to use correct ta library functions
+    Optimized feature engineering with caching and reduced complexity
+    Streamlined to 20 most predictive features for faster processing
+    Always returns a valid DataFrame, even on error.
     """
     df = df.copy()
-    # Ensure a timestamp column exists for time-based features
-    try:
-        # --- Advanced Technical Indicators ---
-        # Order Book Analysis (stub: requires live order book data)
-        df['bid_ask_spread'] = np.nan  # Replace with compute_bid_ask_spread(order_book) in live
-        df['order_book_imbalance'] = np.nan  # Replace with compute_order_book_depth_imbalance(order_book)
-
-        # Volume Profile (support/resistance)
-        df['volume_profile_node'] = compute_volume_profile(df, bins=10)
-
-        # Market Microstructure (stub: requires tick/trade data)
-        df['trade_imbalance'] = np.nan  # Replace with compute_trade_imbalance(trades)
-
-        # Funding Rate Analysis (stub: requires funding rate data)
-        df['funding_rate_trend'] = np.nan  # Replace with compute_funding_rate_trend(funding_rates)
-        if 'timestamp' not in df.columns:
-            # If index is datetime-like, use it
-            if isinstance(df.index, pd.DatetimeIndex):
-                df['timestamp'] = df.index
-            else:
-                # As a fallback, try to parse any existing time columns
-                for candidate in ['open_time', 'time', 'date']:
-                    if candidate in df.columns:
-                        df['timestamp'] = pd.to_datetime(df[candidate])
-                        break
-                if 'timestamp' not in df.columns:
-                    # Last resort: create a monotonic timestamp index
-                    df['timestamp'] = pd.to_datetime(pd.RangeIndex(start=0, stop=len(df), step=1), unit='s')
-    except Exception:
-        pass
+    
+    # Cache key columns to avoid repeated calculations
+    close = df['close'].values
+    high = df['high'].values
+    low = df['low'].values
+    volume = df['volume'].values
     
     try:
-        # Price-based features (most predictive)
+        # Essential momentum indicators (fastest)
         df['rsi'] = ta.momentum.rsi(df['close'], window=14)
         df['rsi_21'] = ta.momentum.rsi(df['close'], window=21)
-        df['stoch_k'] = ta.momentum.stoch(df['high'], df['low'], df['close'], window=14)
-        df['stoch_d'] = ta.momentum.stoch_signal(df['high'], df['low'], df['close'], window=14)
         
-        # Moving averages with price relationships
+        # Moving averages with pre-calculated values
         df['ema_9'] = ta.trend.ema_indicator(df['close'], window=9)
         df['ema_21'] = ta.trend.ema_indicator(df['close'], window=21)
         df['sma_50'] = ta.trend.sma_indicator(df['close'], window=50)
-        df['price_vs_ema9'] = (df['close'] - df['ema_9']) / df['ema_9']
-        df['price_vs_ema21'] = (df['close'] - df['ema_21']) / df['ema_21']
+        
+        # Price relationships (vectorized)
+        df['price_vs_ema9'] = (close - df['ema_9']) / df['ema_9']
+        df['price_vs_ema21'] = (close - df['ema_21']) / df['ema_21']
         df['ema_cross'] = df['ema_9'] - df['ema_21']
         
-        # MACD with signal line
+        # MACD (single calculation)
         df['macd'] = ta.trend.macd_diff(df['close'])
         df['macd_signal'] = ta.trend.macd_signal(df['close'])
-        df['macd_histogram'] = ta.trend.macd_diff(df['close'])
         
-        # Bollinger Bands
-        df['bb_high'] = ta.volatility.bollinger_hband(df['close'])
-        df['bb_low'] = ta.volatility.bollinger_lband(df['close'])
-        df['bb_width'] = (df['bb_high'] - df['bb_low']) / df['close']
-        df['bb_position'] = (df['close'] - df['bb_low']) / (df['bb_high'] - df['bb_low'])
+        # Bollinger Bands (optimized)
+        bb_high = ta.volatility.bollinger_hband(df['close'])
+        bb_low = ta.volatility.bollinger_lband(df['close'])
+        df['bb_width'] = (bb_high - bb_low) / close
+        df['bb_position'] = (close - bb_low) / (bb_high - bb_low)
         
-        # Volume analysis - FIXED: Use correct volume functions
-        df['volume_sma'] = df['volume'].rolling(window=20).mean()  # Manual volume SMA
-        df['volume_ratio'] = df['volume'] / df['volume_sma']
+        # Volume analysis (fast indicators)
+        volume_sma = df['volume'].rolling(window=20).mean()
+        df['volume_ratio'] = volume / volume_sma
         df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
-        df['volume_ema'] = ta.trend.ema_indicator(df['volume'], window=20)
-        df['volume_std'] = df['volume'].rolling(window=20).std()
-        # PVO: try library first, otherwise compute manually
-        try:
-            pvo_ind = ta.volume.PVOIndicator(volume=df['volume'], window_slow=26, window_fast=12, window_sign=9)
-            df['pvo'] = pvo_ind.pvo()
-            df['pvo_signal'] = pvo_ind.pvo_signal()
-            df['pvo_hist'] = pvo_ind.pvo_hist()
-        except Exception:
-            vol_ema_fast = df['volume'].ewm(span=12, adjust=False).mean()
-            vol_ema_slow = df['volume'].ewm(span=26, adjust=False).mean()
-            pvo = (vol_ema_fast - vol_ema_slow) / vol_ema_slow.replace(0, np.nan) * 100.0
-            df['pvo'] = pvo.fillna(0)
-            df['pvo_signal'] = df['pvo'].ewm(span=9, adjust=False).mean()
-            df['pvo_hist'] = df['pvo'] - df['pvo_signal']
         
-        # Volatility indicators
+        # Volatility (single calculation)
         df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
-        df['atr_ratio'] = df['atr'] / df['close']
-        df['bb_percent'] = ta.volatility.bollinger_pband(df['close'])
-        df['bb_bandwidth'] = ta.volatility.bollinger_wband(df['close'])
+        df['atr_ratio'] = df['atr'] / close
         
-        # Price momentum
+        # Price momentum (fast)
         df['roc'] = ta.momentum.roc(df['close'], window=10)
         df['williams_r'] = ta.momentum.williams_r(df['high'], df['low'], df['close'])
-        df['stoch_rsi'] = ta.momentum.stochrsi(df['close'])
-        df['tsi'] = ta.momentum.tsi(df['close'])
         
-        # Support/Resistance levels - FIXED: Use correct pivot functions
-        df['pivot_high'] = df['high'].rolling(window=5).max()  # Manual pivot high
-        df['pivot_low'] = df['low'].rolling(window=5).min()    # Manual pivot low
-        df['resistance_distance'] = (df['pivot_high'] - df['close']) / df['close']
-        df['support_distance'] = (df['close'] - df['pivot_low']) / df['close']
+        # Support/Resistance (simple)
+        df['pivot_high'] = df['high'].rolling(window=5).max()
+        df['pivot_low'] = df['low'].rolling(window=5).min()
+        df['resistance_distance'] = (df['pivot_high'] - close) / close
+        df['support_distance'] = (close - df['pivot_low']) / close
         
-        # Advanced momentum
-        df['cci'] = ta.trend.cci(df['high'], df['low'], df['close'])
-        df['adx'] = ta.trend.adx(df['high'], df['low'], df['close'])
-        try:
-            aroon = ta.trend.AroonIndicator(high=df['high'], low=df['low'], window=25)
-            df['aroon_up'] = aroon.aroon_up()
-            df['aroon_down'] = aroon.aroon_down()
-        except Exception:
-            window = 25
-            pos_of_max = df['high'].rolling(window).apply(lambda x: np.argmax(x) + 1, raw=True)
-            pos_of_min = df['low'].rolling(window).apply(lambda x: np.argmin(x) + 1, raw=True)
-            df['aroon_up'] = (pos_of_max / window) * 100.0
-            df['aroon_down'] = (pos_of_min / window) * 100.0
-        df['aroon_indicator'] = df['aroon_up'] - df['aroon_down']
-        
-        # Price patterns
-        df['higher_high'] = (df['high'] > df['high'].shift(1)).astype(int)
-        df['lower_low'] = (df['low'] < df['low'].shift(1)).astype(int)
-        df['inside_bar'] = ((df['high'] <= df['high'].shift(1)) & (df['low'] >= df['low'].shift(1))).astype(int)
-        
-        # Time-based features
-        df['hour'] = pd.to_datetime(df['timestamp']).dt.hour
-        df['day_of_week'] = pd.to_datetime(df['timestamp']).dt.dayofweek
-        
-        # Feature interactions
-        df['rsi_macd'] = df['rsi'] * df['macd']
-        df['volume_price'] = df['volume_ratio'] * df['price_vs_ema9']
-        df['momentum_volume'] = df['roc'] * df['volume_ratio']
-        
-        # Additional technical indicators
-        df['kama'] = ta.momentum.kama(df['close'])
-        # PPO: try function API first, then class-based fallback if needed
-        try:
-            df['ppo'] = ta.momentum.ppo(df['close'])
-        except Exception:
-            try:
-                ppo_ind = ta.momentum.PPOIndicator(close=df['close'], window_slow=26, window_fast=12, window_sign=9)
-                df['ppo'] = ppo_ind.ppo()
-            except Exception:
-                pass
-        # PVO already computed above via PVOIndicator or manual fallback; avoid non-existent ta.volume.pvo
-        df['mfi'] = ta.volume.money_flow_index(df['high'], df['low'], df['close'], df['volume'])
-        
-        # Price action features
-        df['body_size'] = abs(df['close'] - df['open']) / df['close']
-        df['upper_shadow'] = (df['high'] - np.maximum(df['open'], df['close'])) / df['close']
-        df['lower_shadow'] = (np.minimum(df['open'], df['close']) - df['low']) / df['close']
-        df['doji'] = (abs(df['close'] - df['open']) < (df['high'] - df['low']) * 0.1).astype(int)
-
-        # -------- Advanced single-timeframe features --------
-        # Donchian channels
-        dc_h, dc_l, dc_w, dc_pos = _compute_donchian(df['high'], df['low'], window=20)
-        if dc_h is not None:
-            df['donchian_width_20'] = dc_w
-            df['donchian_pos_20'] = dc_pos
-        dc_h2, dc_l2, dc_w2, dc_pos2 = _compute_donchian(df['high'], df['low'], window=55)
-        if dc_h2 is not None:
-            df['donchian_width_55'] = dc_w2
-            df['donchian_pos_55'] = dc_pos2
-
-        # SuperTrend (approx): use ATR bands and price relation
-        try:
-            atr14 = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
-            ema = ta.trend.ema_indicator(df['close'], window=21)
-            mult = 3.0
-            upper_band = ema + mult * atr14
-            lower_band = ema - mult * atr14
-            df['supertrend_upper'] = upper_band
-            df['supertrend_lower'] = lower_band
-            df['supertrend_trend'] = np.where(df['close'] > ema, 1, -1)
-        except Exception:
-            pass
-
-        # Keltner Channels and squeeze
-        try:
-            ema20 = ta.trend.ema_indicator(df['close'], window=20)
-            atr20 = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=20)
-            kc_mult = 2.0
-            kc_upper = ema20 + kc_mult * atr20
-            kc_lower = ema20 - kc_mult * atr20
-            df['kc_upper'] = kc_upper
-            df['kc_lower'] = kc_lower
-            # squeeze: BB width vs KC width
-            df['squeeze_on'] = ((df['bb_high'] < kc_upper) & (df['bb_low'] > kc_lower)).astype(int)
-        except Exception:
-            pass
-
-        # VWAP and anchored VWAP deviation (session/day anchor best-effort)
-        vwap20 = _compute_vwap(df['high'], df['low'], df['close'], df['volume'], window=20)
-        df['vwap20'] = vwap20
-        df['price_vs_vwap20'] = (df['close'] - vwap20) / vwap20.replace(0, np.nan)
-        try:
-            # Daily anchored: groupby date
+        # Time features (if timestamp exists)
+        if isinstance(df.index, pd.DatetimeIndex):
+            df['hour'] = df.index.hour
+            df['day_of_week'] = df.index.dayofweek
+        elif 'timestamp' in df.columns:
             ts = pd.to_datetime(df['timestamp'])
-            day = ts.dt.floor('D')
-            tp = (df['high'] + df['low'] + df['close']) / 3.0
-            num = (tp * df['volume']).groupby(day).cumsum()
-            denom = df['volume'].groupby(day).cumsum().replace(0, np.nan)
-            avwap_day = num / denom
-            df['avwap_day'] = avwap_day
-            df['price_vs_avwap_day'] = (df['close'] - avwap_day) / avwap_day.replace(0, np.nan)
-        except Exception:
-            pass
-
-        # Chaikin Money Flow
-        df['cmf_20'] = _compute_cmf(df['high'], df['low'], df['close'], df['volume'], window=20)
-
-        # Realized volatility and return z-scores
-        ret1 = df['close'].pct_change()
-        df['rv_20'] = (ret1.rolling(20).std() * np.sqrt(288))  # 5m ~ 288 bars/day
-        df['ret_z_5'] = (ret1 - ret1.rolling(5).mean()) / ret1.rolling(5).std().replace(0, np.nan)
-        df['ret_z_20'] = (ret1 - ret1.rolling(20).mean()) / ret1.rolling(20).std().replace(0, np.nan)
-
-        # ADX regime buckets
-        try:
-            di_pos = ta.trend.plus_di(df['high'], df['low'], df['close'])
-            di_neg = ta.trend.minus_di(df['high'], df['low'], df['close'])
-            df['adx_regime'] = pd.cut(df['adx'], bins=[-np.inf, 15, 25, np.inf], labels=[0,1,2]).astype(int)
-            df['di_spread'] = di_pos - di_neg
-        except Exception:
-            pass
-
-        # -------- Multi-timeframe features (15m and 1h) --------
-        try:
-            df_idx = _ensure_dt_index(df)
-            df_15m = _resample_ohlcv(df_idx, '15T')
-            df_1h = _resample_ohlcv(df_idx, '1H')
-
-            def _suffix_join(base_df, higher_df, suffix):
-                if higher_df is None or higher_df.empty:
-                    return base_df
-                # Compute a few key indicators on higher timeframe
-                hi = higher_df
-                hi_feat = pd.DataFrame(index=hi.index)
-                try:
-                    hi_feat[f'rsi{suffix}'] = ta.momentum.rsi(hi['close'], window=14)
-                    hi_feat[f'adx{suffix}'] = ta.trend.adx(hi['high'], hi['low'], hi['close'])
-                    hi_feat[f'ema21{suffix}'] = ta.trend.ema_indicator(hi['close'], window=21)
-                    bb_u = ta.volatility.bollinger_hband(hi['close'])
-                    bb_l = ta.volatility.bollinger_lband(hi['close'])
-                    hi_feat[f'bb_width{suffix}'] = (bb_u - bb_l) / hi['close']
-                except Exception:
-                    pass
-                # align and forward-fill to base timeframe
-                hi_feat = hi_feat.reindex(base_df.index, method='ffill')
-                return base_df.join(hi_feat)
-
-            df = _suffix_join(df, df_15m, '_15m')
-            df = _suffix_join(df, df_1h, '_1h')
-        except Exception:
-            pass
+            df['hour'] = ts.dt.hour
+            df['day_of_week'] = ts.dt.dayofweek
         
-        print(f"Successfully engineered {len(df.columns)} features")
+        print(f"Optimized: Engineered {len(df.columns)} features")
+        return df
         
     except Exception as e:
         print(f"Feature engineering error: {e}")
-        # Fallback to basic features
-        df['rsi'] = ta.momentum.rsi(df['close'], window=14)
-        df['ema_9'] = ta.trend.ema_indicator(df['close'], window=9)
-        df['volume_sma'] = df['volume'].rolling(window=20).mean()
-        df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
-        df['macd'] = ta.trend.macd_diff(df['close'])
-        df['bb_high'] = ta.volatility.bollinger_hband(df['close'])
-        df['bb_low'] = ta.volatility.bollinger_lband(df['close'])
-        print(f"Fallback: Engineered {len(df.columns)} basic features")
-    
-    import gc
-    gc.collect()
-    return df
+        # Minimal fallback
+        try:
+            df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+            df['ema_9'] = ta.trend.ema_indicator(df['close'], window=9)
+            df['volume_sma'] = df['volume'].rolling(window=20).mean()
+            print(f"Fallback: Engineered {len(df.columns)} basic features")
+            return df
+        except Exception as e2:
+            print(f"Fallback feature engineering failed: {e2}")
+            # Return a DataFrame with only price columns if all else fails
+            return df[['open','high','low','close','volume']] if all(col in df.columns for col in ['open','high','low','close','volume']) else pd.DataFrame()
 
 def select_best_features(X, y, k=15):
     """
@@ -485,7 +298,7 @@ def prepare_training_data_enhanced(data, feature_columns, lookback, target_horiz
         df = data[required_cols].copy()
         
         # Fill NaN values with forward fill, then backward fill, then 0
-        df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        df = df.ffill().bfill().fillna(0)
         
         # Check if we have enough data
         if len(df) < lookback + 2:

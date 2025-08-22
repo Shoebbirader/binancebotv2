@@ -5,8 +5,8 @@
   "epochs": 100,
   "learning_rate": 0.0001,
   "batch_size": 16,
-  "prediction_threshold": 0.70,
-  "sell_threshold": 0.30,
+  "prediction_threshold": 0.65,
+  "sell_threshold": 0.35,
   "position_size_pct": 10,
   "max_loss_per_trade_pct": 3,
   "min_leverage": 2,
@@ -16,7 +16,7 @@
   "max_positions": 2,
   "risk_per_trade": 2,
   "live_trading": false,
-  "auto_execute": false,
+  "auto_execute": true,
   "paper_trading": true,
   "api_rate_limit_ms": 100
 }
