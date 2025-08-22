@@ -78,14 +78,17 @@ class RiskManager:
     def calculate_position_size(self, balance, current_price, leverage):
         """Calculate position size based on risk management with proper leverage accounting"""
         try:
+            # Validate leverage against exchange limits
+            leverage = min(max(leverage, self.min_leverage), self.max_leverage)
+            
             # Calculate risk amount per trade (not adjusted by leverage)
             risk_amount = balance * (self.max_loss_pct / 100.0)
             
             # Calculate position value in USDT based on risk and stop loss
             position_value_usdt = risk_amount * (100.0 / self.stop_loss_percent)
             
-            # Apply position size percentage limit
-            max_position_usdt = balance * (self.position_size_pct / 100.0) * leverage
+            # Apply position size percentage limit (without leverage multiplier)
+            max_position_usdt = balance * (self.position_size_pct / 100.0)
             position_value_usdt = min(position_value_usdt, max_position_usdt)
             
             # Convert to quantity (this is the actual quantity we'll trade)

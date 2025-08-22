@@ -216,9 +216,16 @@ def train_model_balanced(model, X, y, epochs=25, batch_size=32, lr=0.002):
             print("Warning: Only one class present")
             return None
 
-        # Fast split (80/20)
-        split_idx = int(0.8 * len(X))
-        X_train, X_val = X[:split_idx], X[split_idx:]
+        # Time-based split (last 24h as validation)
+        time_split = int(0.8 * len(X))
+        if isinstance(X, pd.DataFrame):
+            time_split = X.index[-1] - pd.Timedelta(hours=24)
+            val_mask = X.index >= time_split
+            X_train, X_val = X[~val_mask], X[val_mask]
+            y_train, y_val = y[~val_mask], y[val_mask]
+        else:
+            split_idx = int(0.8 * len(X))
+            X_train, X_val = X[:split_idx], X[split_idx:]
         y_train, y_val = y[:split_idx], y[split_idx:]
 
         print(f"Training samples: {len(X_train)}, Validation: {len(X_val)}")

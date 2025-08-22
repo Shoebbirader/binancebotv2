@@ -364,7 +364,34 @@ class BinanceInterface:
             logging.error(f"Unexpected error getting position for {symbol}: {e}")
             raise
     
-    def place_futures_order(self, symbol, side, quantity, order_type='MARKET', price=None, stop_loss=None, take_profit=None):
+    def get_order_book_price(self, symbol, side, quantity):
+        """Get executable price based on current order book depth"""
+        try:
+            self._rate_limit()
+            order_book = self.client.futures_order_book(symbol=symbol, limit=5)
+            if side == 'BUY':
+                # Get best ask price that can fulfill the quantity
+                asks = order_book['asks']
+                cumulative = 0.0
+                for price, qty in asks:
+                    cumulative += float(qty)
+                    if cumulative >= quantity:
+                        return float(price)
+                return float(asks[-1][0])  # Fallback to last ask
+            else:
+                # Get best bid price that can fulfill the quantity
+                bids = order_book['bids']
+                cumulative = 0.0
+                for price, qty in bids:
+                    cumulative += float(qty)
+                    if cumulative >= quantity:
+                        return float(price)
+                return float(bids[-1][0])  # Fallback to last bid
+        except Exception as e:
+            logging.error(f"Order book check failed: {e}")
+            return None
+
+    def place_futures_order(self, symbol, side, quantity, order_type='MARKET', price=None, stop_loss=None, take_profit=None, regime_volatility='NORMAL'):
         self._rate_limit()
         """Place futures order with (optional) reduce-only SL and TP. Returns dict with order ids."""
         try:

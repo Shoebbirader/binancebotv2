@@ -167,7 +167,12 @@ def main():
         start_time = time.time()
         try:
             # Collect more data for better training
-            data = data_collector.fetch_historical(symbol, limit=1500)
+            # Get data with freshness check
+            data = data_collector.fetch_historical(symbol, limit=2000)
+            if data is not None and len(data) > 0:
+                earliest_ts = pd.to_datetime(data.index[0]).timestamp()
+                if time.time() - earliest_ts > 3600*24*3:  # Older than 3 days
+                    data = data_collector.fetch_historical(symbol, limit=3000)
             if data is None or len(data) < lookback + 200:  # Increased minimum data requirement
                 print(f"Insufficient data for {symbol}, skipping... (need {lookback + 200}, got {len(data) if data is not None else 0})")
                 return symbol, None
