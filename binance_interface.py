@@ -380,7 +380,7 @@ class BinanceInterface:
                 'quantity': qty
             }
             
-            if price and order_type == 'LIMIT':
+            if price and order_type == 'LIMIT' and px is not None:
                 order_params['price'] = px
                 order_params['timeInForce'] = 'GTC'
             

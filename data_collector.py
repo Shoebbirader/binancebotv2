@@ -24,10 +24,26 @@ class DataCollector:
         try:
             limit = min(limit, 1000)
             
-            # Simple caching check (in-memory)
+            # Simple caching check with expiration (5 minutes for real-time trading)
+            import time
             cache_key = f"{symbol}_{self.interval}_{limit}"
+            current_time = time.time()
+            
             if cache_key in self._cache:
-                return self._cache[cache_key]
+                try:
+                    cached_data, cache_time = self._cache[cache_key]
+                    # Cache expires after 5 minutes for fresher data
+                    if current_time - cache_time < 300:  # 5 minutes
+                        logging.info(f"Using cached data for {symbol} (age: {(current_time - cache_time):.0f}s)")
+                        return cached_data
+                    else:
+                        # Remove expired cache entry
+                        del self._cache[cache_key]
+                except (ValueError, TypeError, KeyError) as e:
+                    # Handle corrupted cache entry
+                    logging.warning(f"Corrupted cache entry for {cache_key}, removing: {e}")
+                    if cache_key in self._cache:
+                        del self._cache[cache_key]
             
             with self._lock:
                 klines = self.client.futures_klines(symbol=symbol, interval=self.interval, limit=limit)
@@ -49,12 +65,12 @@ class DataCollector:
             df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
             df.set_index('open_time', inplace=True)
             
-            # Cache the result with size limit
+            # Cache the result with size limit and timestamp
             if len(self._cache) >= self._cache_max_size:
                 # Remove oldest entry (FIFO)
                 oldest_key = next(iter(self._cache))
                 del self._cache[oldest_key]
-            self._cache[cache_key] = df
+            self._cache[cache_key] = (df, current_time)
             
             logging.info(f"Fetched {len(df)} points for {symbol}")
             return df

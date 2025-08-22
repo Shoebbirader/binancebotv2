@@ -144,10 +144,12 @@ class PaperTradingInterface:
                 'unrealized_pnl': 0.0
             }
             
+            # Limit order history to prevent memory leaks
             self.order_history.append(order)
+            if len(self.order_history) > 1000:
+                self.order_history = self.order_history[-500:]  # Keep last 500
+                
             logging.info(f"Paper trade: {side} {quantity} {symbol} @ ${current_price:.4f}")
-            # Log to CSV
-            self._log_trade_csv(order)
             return {
                 'main': order,
                 'sl': {'orderId': f"sl_{order['orderId']}"} if stop_loss else None,
@@ -158,19 +160,26 @@ class PaperTradingInterface:
         """Simulate closing a position with thread safety"""
         with self._lock:
             if symbol not in self.positions:
-                raise ValueError(f"No position found for {symbol}")
+                logging.warning(f"No position found for {symbol} to close")
+                return {'orderId': f"close_{int(time.time() * 1000)}", 'status': 'NO_POSITION'}
+                
             position = self.positions[symbol]
             current_price = self.current_prices.get(symbol)
             if current_price is None:
-                raise ValueError(f"No price available for {symbol}")
-            # Calculate P&L with leverage
+                logging.error(f"No price available for {symbol}")
+                return {'orderId': f"close_{int(time.time() * 1000)}", 'status': 'ERROR'}
+                
+            # Calculate P&L (quantity is actual position size, not leveraged)
+            leverage = position.get('leverage', 1)
             if position['side'] == 'LONG':
-                pnl = (current_price - position['entry_price']) * position['quantity'] * position.get('leverage', 1)
+                pnl = (current_price - position['entry_price']) * position['quantity']
             else:
-                pnl = (position['entry_price'] - current_price) * position['quantity'] * position.get('leverage', 1)
-            # Return margin to balance and add/subtract P&L
-            margin_used = position.get('margin_used', (position['entry_price'] * position['quantity']) / position.get('leverage', 1))
+                pnl = (position['entry_price'] - current_price) * position['quantity']
+                
+            # Return margin and apply P&L
+            margin_used = position.get('margin_used', (position['entry_price'] * position['quantity']) / leverage)
             self.current_balance += margin_used + pnl
+            
             # Record trade
             trade = {
                 'symbol': symbol,
@@ -181,11 +190,20 @@ class PaperTradingInterface:
                 'pnl': pnl,
                 'exit_time': datetime.now().isoformat()
             }
+            
+            # Limit history sizes to prevent memory leaks
             self.trade_history.append(trade)
-            del self.positions[symbol]
+            if len(self.trade_history) > 1000:
+                self.trade_history = self.trade_history[-500:]  # Keep last 500
+                
             self.pnl_history.append(pnl)
+            if len(self.pnl_history) > 1000:
+                self.pnl_history = self.pnl_history[-500:]  # Keep last 500
+                
+            # Clean up
+            del self.positions[symbol]
             logging.info(f"Paper trade closed: {symbol} P&L: ${pnl:.4f}, Balance: ${self.current_balance:.2f}")
-            self._log_trade_csv(trade)
+            
             return {'orderId': f"close_{int(time.time() * 1000)}", 'status': 'FILLED'}
     
     def _update_position_pnl(self, symbol: str, current_price: float):
@@ -200,11 +218,11 @@ class PaperTradingInterface:
                 return
             position = dict(self.positions[symbol])  # Create copy to work with
             
-        # Calculate P&L outside of lock
+        # Calculate P&L outside of lock (quantity is actual position size, not leveraged)
         if position['side'] == 'LONG':
-            pnl = (current_price - position['entry_price']) * position['quantity'] * position.get('leverage', 1)
+            pnl = (current_price - position['entry_price']) * position['quantity']
         else:
-            pnl = (position['entry_price'] - current_price) * position['quantity'] * position.get('leverage', 1)
+            pnl = (position['entry_price'] - current_price) * position['quantity']
             
         # Update P&L atomically
         with self._lock:
@@ -262,6 +280,11 @@ class PaperTradingInterface:
                 order['main']['price'] = price
             orders.append(order['main'] if order and 'main' in order else None)
         return {'main': orders[0] if orders else None, 'scaled': orders}
+    
+    def cancel_all_open_orders(self, symbol):
+        """Simulate cancelling all open orders for a symbol"""
+        logging.info(f"Paper trading: Simulated cancel all orders for {symbol}")
+        return {'cancelled': 0}  # No open orders to cancel in paper trading
 
 # Global paper trading instance
 paper_trader = None

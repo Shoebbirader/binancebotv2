@@ -26,9 +26,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 def main():
-    # Load configuration
-    with open('config/trading_config.json') as f:
-        config = json.load(f)
+    # Load and validate configuration
+    try:
+        with open('config/trading_config.json') as f:
+            config = json.load(f)
+        
+        # Validate configuration
+        from config_validator import validate_config, validate_environment_vars
+        is_valid, errors = validate_config(config)
+        if not is_valid:
+            log_error("Configuration validation failed:")
+            for error in errors:
+                print(f"❌ {error}")
+            return
+        
+        # Validate environment variables
+        env_valid, env_errors = validate_environment_vars()
+        if not env_valid:
+            log_error("Environment validation failed:")
+            for error in env_errors:
+                print(f"❌ {error}")
+            return
+            
+    except Exception as e:
+        log_error(f"Failed to load or validate configuration: {e}")
+        return
     
     # Initialize components
     data_collector = DataCollector('config/trading_config.json')
@@ -85,11 +107,15 @@ def main():
     batch_size = config.get('batch_size', 32)
     prediction_threshold = config.get('prediction_threshold', 0.6)
     
-    print("🚀 Starting BinanceBot with FULL LIVE TRADING enabled!")
-    print(f" Trading threshold: {prediction_threshold}")
+    # Display correct trading mode
+    trading_mode = "PAPER TRADING" if config.get('paper_trading', True) else "LIVE TRADING"
+    mode_emoji = "📊" if config.get('paper_trading', True) else "🚨"
+    
+    print(f"{mode_emoji} Starting BinanceBot in {trading_mode} mode!")
+    print(f"🎯 Trading threshold: {prediction_threshold}")
     print(f"💰 Position size: {config.get('position_size_pct', 10)}% of balance")
     print(f"⚡ Leverage range: {config.get('min_leverage', 3)}x - {config.get('max_leverage', 8)}x")
-    print(f"Configuration: Lookback={lookback}, Epochs={epochs}, LR={learning_rate}")
+    print(f"📈 Configuration: Lookback={lookback}, Epochs={epochs}, LR={learning_rate}")
     print("=" * 60)
     
     # Portfolio-level price data collection for optimization
@@ -249,7 +275,7 @@ def main():
             # Ensemble prediction with validation
             preds = [pred_lstm, pred_rf, pred_xgb, pred_lgb]
             preds = [p for p in preds if p is not None and not np.isnan(p) and 0 <= p <= 1]
-            if len(preds) < 3:  # Require at least 3 models for ensemble
+            if len(preds) < 2:  # Require at least 2 models for ensemble
                 print(f"Warning: Not enough valid model predictions for {symbol} ({len(preds)}/4), skipping trade")
                 return symbol, None
             
@@ -258,29 +284,37 @@ def main():
                 print(f"Warning: Invalid ensemble prediction {ensemble_pred} for {symbol}, skipping trade")
                 return symbol, None
             
-            # Model consensus check - require majority agreement
-            extreme_preds = [p for p in preds if p > 0.7 or p < 0.3]
-            if len(extreme_preds) < len(preds) * 0.6:  # At least 60% of models should agree on direction
-                print(f"Warning: Low model consensus for {symbol}, skipping trade (extreme predictions: {len(extreme_preds)}/{len(preds)})")
+            # Model consensus check - require agreement on direction
+            # Check if models agree on BUY (>0.6) or SELL (<0.4) direction
+            buy_votes = [p for p in preds if p > 0.6]
+            sell_votes = [p for p in preds if p < 0.4]
+            consensus_votes = max(len(buy_votes), len(sell_votes))
+            
+            if consensus_votes < len(preds) * 0.5:  # At least 50% of models should agree on direction
+                print(f"Warning: No model consensus for {symbol}, skipping trade (buy votes: {len(buy_votes)}, sell votes: {len(sell_votes)} out of {len(preds)})")
                 return symbol, None
 
-            # Robust threshold logic: buy > threshold, sell < sell_threshold, hold otherwise
-            sell_threshold = adaptive_config.get('sell_threshold', 0.30)  # Default lower than buy threshold
-            if ensemble_pred >= prediction_threshold:
+            # Fixed prediction logic: 
+            # High prediction (>0.65) = BUY signal (model confident price will rise)
+            # Low prediction (<0.35) = SELL signal (model confident price will fall)
+            buy_threshold = prediction_threshold  # e.g., 0.65
+            sell_threshold = adaptive_config.get('sell_threshold', 0.35)  # e.g., 0.35
+            
+            if ensemble_pred >= buy_threshold:
                 action = "BUY"
-                print(f"🟢 {symbol}: Prediction {ensemble_pred:.4f} >= threshold {prediction_threshold}, {action} signal!")
+                print(f"🟢 {symbol}: Prediction {ensemble_pred:.4f} >= BUY threshold {buy_threshold}, {action} signal!")
                 log_prediction(symbol, ensemble_pred, ensemble_pred, action)
                 with binance_lock:
                     execute_live_trade(symbol, "BUY", ensemble_pred, risk_manager, binance, config, regime_summary, data)
             elif ensemble_pred <= sell_threshold:
                 action = "SELL"
-                print(f"🔴 {symbol}: Prediction {ensemble_pred:.4f} <= sell threshold {sell_threshold}, {action} signal!")
+                print(f"🔴 {symbol}: Prediction {ensemble_pred:.4f} <= SELL threshold {sell_threshold}, {action} signal!")
                 log_prediction(symbol, ensemble_pred, ensemble_pred, action)
                 with binance_lock:
                     execute_live_trade(symbol, "SELL", ensemble_pred, risk_manager, binance, config, regime_summary, data)
             else:
                 action = "HOLD"
-                print(f"🟡 {symbol}: Prediction {ensemble_pred:.4f} between thresholds, no trade.")
+                print(f"🟡 {symbol}: Prediction {ensemble_pred:.4f} between thresholds ({sell_threshold}-{buy_threshold}), HOLD.")
                 log_prediction(symbol, ensemble_pred, ensemble_pred, action)
 
             elapsed_time = time.time() - start_time
@@ -374,18 +408,33 @@ def main():
         print(f"Error in advanced risk analytics: {e}")
 
 def adapt_config_by_regime(config, regime_summary):
+    """Create regime-adaptive configuration without modifying original"""
     adaptive_config = dict(config)
-    if regime_summary['volatility'] == 'HIGH':
-        adaptive_config['position_size_pct'] = max(5, config.get('position_size_pct', 10) // 2)
-        adaptive_config['stop_loss_percent'] = min(4, config.get('stop_loss_percent', 2) * 2)
-    elif regime_summary['volatility'] == 'LOW':
-        adaptive_config['position_size_pct'] = min(15, config.get('position_size_pct', 10) * 2)
-        adaptive_config['stop_loss_percent'] = max(1, config.get('stop_loss_percent', 2) // 2)
-    if regime_summary['trend'] == 'STRONG_TREND':
-        adaptive_config['take_profit_percent'] = min(10, config.get('take_profit_percent', 5) * 2)
-    elif regime_summary['trend'] == 'SIDEWAYS':
-        adaptive_config['take_profit_percent'] = max(2, config.get('take_profit_percent', 5) // 2)
+    
+    # Validate regime_summary
+    volatility = regime_summary.get('volatility', 'NORMAL')
+    trend = regime_summary.get('trend', 'SIDEWAYS')
+    
+    # Adaptive position sizing based on volatility
+    if volatility == 'HIGH':
         adaptive_config['position_size_pct'] = max(2, config.get('position_size_pct', 10) // 2)
+        adaptive_config['stop_loss_percent'] = min(5, max(1, config.get('stop_loss_percent', 2) * 1.5))
+    elif volatility == 'LOW':
+        adaptive_config['position_size_pct'] = min(20, config.get('position_size_pct', 10) * 1.5)
+        adaptive_config['stop_loss_percent'] = max(0.5, config.get('stop_loss_percent', 2) * 0.8)
+    
+    # Adaptive take profit based on trend
+    if trend == 'STRONG_TREND':
+        adaptive_config['take_profit_percent'] = min(15, config.get('take_profit_percent', 5) * 1.8)
+    elif trend == 'SIDEWAYS':
+        adaptive_config['take_profit_percent'] = max(1.5, config.get('take_profit_percent', 5) * 0.7)
+        adaptive_config['position_size_pct'] = max(5, adaptive_config['position_size_pct'] * 0.8)
+    
+    # Ensure valid ranges
+    adaptive_config['position_size_pct'] = max(1, min(50, adaptive_config['position_size_pct']))
+    adaptive_config['stop_loss_percent'] = max(0.5, min(10, adaptive_config['stop_loss_percent']))
+    adaptive_config['take_profit_percent'] = max(1, min(20, adaptive_config['take_profit_percent']))
+    
     return adaptive_config
 
 def execute_live_trade(symbol, action, confidence, risk_manager, binance, config, regime_summary, data):
@@ -405,12 +454,15 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
             
             # Volume check (ensure sufficient volume for execution)
             try:
-                # Check 24hr volume to ensure liquidity
-                stats = binance.client.futures_24hr_ticker(symbol=symbol)
-                volume_24h = float(stats['volume'])
-                if volume_24h < 100000:  # Minimum volume threshold
-                    log_warning(f"Insufficient 24h volume for {symbol}: {volume_24h}")
-                    return
+                # Check 24hr volume to ensure liquidity (only for live trading)
+                if hasattr(binance, 'client'):
+                    stats = binance.client.futures_24hr_ticker(symbol=symbol)
+                    volume_24h = float(stats['volume'])
+                    if volume_24h < 100000:  # Minimum volume threshold
+                        log_warning(f"Insufficient 24h volume for {symbol}: {volume_24h}")
+                        return
+                else:
+                    log_info(f"Skipping volume check for paper trading: {symbol}")
             except Exception as e:
                 log_warning(f"Could not verify volume for {symbol}: {e}")
                 return
@@ -477,15 +529,15 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
             log_error(f"Failed to get price for {symbol}: {e}")
             return
 
-        # Check existing position
+        # Check existing position (with error handling)
         try:
             existing_position = binance.get_position_info(symbol)
             if existing_position:
                 log_warning(f"Position already exists for {symbol}: {existing_position}")
                 return
         except Exception as e:
-            log_error(f"Failed to check position for {symbol}: {e}")
-            # Continue anyway for testing
+            log_warning(f"Could not check existing position for {symbol}: {e}")
+            # Continue anyway - position tracking will handle duplicates
 
         # Use regime-adaptive config (use config passed from process_symbol)
         adaptive_config = config.copy()
@@ -500,13 +552,16 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
             log_error(f"Invalid position size calculated: {position_size}")
             return
 
-        # Set leverage
+        # Set leverage (if supported by interface)
         try:
-            binance.set_leverage(symbol, leverage)
-            print(f"⚡ Leverage set to {leverage}x for {symbol}")
+            if hasattr(binance, 'set_leverage'):
+                binance.set_leverage(symbol, leverage)
+                print(f"⚡ Leverage set to {leverage}x for {symbol}")
+            else:
+                print(f"⚡ Leverage {leverage}x configured for {symbol} (paper trading)")
         except Exception as e:
-            log_error(f"Failed to set leverage for {symbol}: {e}")
-            # Continue anyway for testing
+            log_warning(f"Could not set leverage for {symbol}: {e}")
+            # Continue anyway
 
         # Calculate stop-loss and take-profit
         stop_loss = risk_manager.calculate_stop_loss_price(current_price, action, adaptive_config.get('stop_loss_percent', 5))
@@ -691,8 +746,9 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
         except Exception as e:
             log_error(f"Error logging trade to CSV: {e}")
         
-        print(f"💰 LIVE TRADE EXECUTED: {symbol} {action} | Size: {position_size:.6f} | Leverage: {leverage}x")
-        print(f"🎯 Trade executed successfully! Monitor position for exit signals.")
+        trade_type = "PAPER" if config.get('paper_trading', False) else "LIVE"
+        print(f"💰 {trade_type} TRADE EXECUTED: {symbol} {action} | Size: {position_size:.6f} | Leverage: {leverage}x")
+        print(f"🎯 {trade_type} trade executed successfully! Monitor position for exit signals.")
 
     except Exception as e:
         log_error(f"Live trade execution failed for {symbol}: {e}")
@@ -714,17 +770,27 @@ def monitor_positions(risk_manager, binance, config):
                 if exit_signal:
                     print(f"🚨 {exit_signal} triggered for {symbol} at {current_price}")
                     
-                    # Close position
-                    close_side = 'SELL' if position['side'] == 'BUY' else 'BUY'
-                    binance.close_position(symbol, close_side, abs(position['quantity']))
-                    # Cancel any remaining open SL/TP after closing
+                    # Close position (with error handling)
                     try:
-                        binance.cancel_all_open_orders(symbol)
+                        close_side = 'SELL' if position['side'] == 'BUY' else 'BUY'
+                        if hasattr(binance, 'close_position'):
+                            binance.close_position(symbol, close_side, abs(position['quantity']))
+                        else:
+                            # For paper trading, close position directly
+                            binance.close_position(symbol, close_side, abs(position['quantity']))
+                        
+                        # Cancel any remaining open orders if method exists
+                        if hasattr(binance, 'cancel_all_open_orders'):
+                            try:
+                                binance.cancel_all_open_orders(symbol)
+                            except Exception as e:
+                                log_warning(f"Failed to cancel remaining orders for {symbol}: {e}")
+                        
+                        # Update tracking
+                        risk_manager.close_position_tracking(symbol, current_price, exit_signal)
+                        
                     except Exception as e:
-                        log_warning(f"Failed to cancel remaining orders for {symbol}: {e}")
-                    
-                    # Update tracking
-                    risk_manager.close_position_tracking(symbol, current_price, exit_signal)
+                        log_error(f"Failed to close position for {symbol}: {e}")
                     
                     print(f"✅ Position closed: {symbol} {exit_signal}")
                 
@@ -737,102 +803,11 @@ def monitor_positions(risk_manager, binance, config):
 
 def run_paper_trading_cycle(paper_trader, risk_manager, config):
     """
-    Run a single paper trading cycle
+    DEPRECATED: This function is not used in current implementation.
+    Paper trading is handled directly in the main trading loop.
     """
-    symbols = config['symbols']
-    prediction_threshold = config['prediction_threshold']
-    sell_threshold = config['sell_threshold']
-    
-    for symbol in symbols:
-        try:
-            # Get current price for paper trading
-            current_price = paper_trader.get_current_price(symbol)
-            if current_price is None:
-                # Simulate price if not available
-                current_price = 100.0  # Default simulated price
-            
-            # Update paper trading prices
-            paper_trader.update_prices({symbol: current_price})
-            
-            # Get features and make prediction (simulate with random data for demo)
-            # In real implementation, use actual market data
-            features = np.random.randn(1, 50)  # Simulated features
-            
-            # Simulate ensemble prediction
-            ensemble_pred = np.random.uniform(0, 1)
-            
-            print(f"📊 {symbol}: Paper prediction {ensemble_pred:.4f}")
-            
-            # Generate trading signal
-            if ensemble_pred > prediction_threshold:
-                action = "BUY"
-                side = "LONG"
-            elif ensemble_pred < sell_threshold:
-                action = "SELL"
-                side = "SHORT"
-            else:
-                continue
-            
-            # Check if we should enter position
-            if risk_manager.should_enter(ensemble_pred):
-                position_size = risk_manager.calculate_position_size(
-                    symbol, current_price, paper_trader.get_account_balance()
-                )
-                
-                if position_size > 0 and risk_manager.can_open_new_position(symbol):
-                    # Calculate stop loss and take profit
-                    stop_loss = risk_manager.calculate_stop_loss_price(
-                        current_price, side
-                    )
-                    take_profit = risk_manager.calculate_take_profit_price(
-                        current_price, side
-                    )
-                    
-                    # Execute paper trade
-                    result = paper_trader.place_futures_order(
-                        symbol=symbol,
-                        side="BUY" if action == "BUY" else "SELL",
-                        quantity=position_size,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit
-                    )
-                    
-                    # Track position
-                    risk_manager.add_position(symbol, {
-                        'side': side,
-                        'quantity': position_size,
-                        'entry_price': current_price,
-                        'stop_loss': stop_loss,
-                        'take_profit': take_profit
-                    })
-                    
-                    print(f"📝 Paper trade: {action} {position_size} {symbol} @ ${current_price:.4f}")
-                    
-                    # Monitor and close positions if needed
-                    positions = paper_trader.get_account_info()['positions']
-                    for pos in positions:
-                        if pos['symbol'] == symbol:
-                            # Check exit conditions
-                            if risk_manager.should_stop_loss(current_price, pos['entry_price'], side):
-                                paper_trader.close_position(symbol, "SELL" if side == "LONG" else "BUY", pos['quantity'])
-                                print(f"🛑 Paper stop loss: Close {symbol}")
-                            elif risk_manager.should_take_profit(current_price, pos['entry_price'], side):
-                                paper_trader.close_position(symbol, "SELL" if side == "LONG" else "BUY", pos['quantity'])
-                                print(f"💰 Paper take profit: Close {symbol}")
-            
-        except Exception as e:
-            log_error(f"Error in paper trading cycle for {symbol}: {e}")
-            continue
-    
-    # Print paper trading summary
-    try:
-        summary = paper_trader.get_account_info()
-        print(f"💰 Paper Balance: ${summary['balance']:.2f}")
-        print(f"📈 Total P&L: ${summary['total_pnl']:.2f} ({summary['total_pnl_pct']:.2f}%)")
-        print(f"📊 Active Positions: {summary['active_positions']}")
-        print("-" * 50)
-    except Exception as e:
-        log_error(f"Error getting paper trading summary: {e}")
+    log_warning("run_paper_trading_cycle is deprecated - paper trading handled in main loop")
+    return
 
 if __name__ == "__main__":
     main()

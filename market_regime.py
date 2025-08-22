@@ -13,12 +13,12 @@ class MarketRegimeDetector:
         self.classifier = RandomForestClassifier(n_estimators=50, random_state=42)
 
     def compute_volatility_regime(self, df, atr_window=14, threshold_high=0.02, threshold_low=0.005):
-        if df is None or len(df) == 0 or df[['high','low','close']].isnull().any().any():
-            return 'NORMAL'
         """
         ATR-based volatility regime detection
         Returns: 'HIGH', 'LOW', or 'NORMAL'
         """
+        if df is None or len(df) == 0 or df[['high','low','close']].isnull().any().any():
+            return 'NORMAL'
         atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=atr_window)
         atr_ratio = atr / df['close']
         last_atr = atr_ratio.iloc[-1]
@@ -30,15 +30,18 @@ class MarketRegimeDetector:
             return 'NORMAL'
 
     def compute_trend_strength(self, df, adx_window=14, ma_window=21, adx_threshold=25, slope_threshold=0.001):
-        if df is None or len(df) < ma_window or df[['high','low','close']].isnull().any().any():
-            return 'SIDEWAYS'
         """
         ADX and moving average slope for trend detection
         Returns: 'STRONG_TREND', 'WEAK_TREND', or 'SIDEWAYS'
         """
+        if df is None or len(df) < ma_window or df[['high','low','close']].isnull().any().any():
+            return 'SIDEWAYS'
         adx = ta.trend.adx(df['high'], df['low'], df['close'], window=adx_window)
         ma = df['close'].rolling(ma_window).mean()
-        slope = np.polyfit(np.arange(ma_window), ma[-ma_window:], 1)[0] / ma[-ma_window:].mean()
+        ma_slice = ma[-ma_window:]
+        if len(ma_slice) == 0 or ma_slice.mean() == 0:
+            return 'SIDEWAYS'
+        slope = np.polyfit(np.arange(ma_window), ma_slice, 1)[0] / ma_slice.mean()
         last_adx = adx.iloc[-1]
         if last_adx > adx_threshold and abs(slope) > slope_threshold:
             return 'STRONG_TREND'

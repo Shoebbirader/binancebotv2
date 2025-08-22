@@ -310,6 +310,17 @@ def prepare_training_data_enhanced(data, feature_columns, lookback, target_horiz
 
         # Use only the next immediate price movement to prevent lookahead bias
         for i in range(lookback, len(df) - 1):
+            # Target: Next immediate price movement (1 candle ahead)
+            current_price = df['close'].iloc[i]
+            next_price = df['close'].iloc[i + 1]
+
+            # Calculate immediate price change
+            price_change_pct = (next_price - current_price) / current_price * 100
+
+            # Skip sideways movements first to keep X and y synchronized
+            if abs(price_change_pct) < 0.3:  # Skip small movements
+                continue
+
             # Features: lookback periods of feature data (only past data)
             feature_slice = df[feature_columns].iloc[i-lookback:i].values
             
@@ -324,20 +335,17 @@ def prepare_training_data_enhanced(data, feature_columns, lookback, target_horiz
             except (ValueError, TypeError):
                 # Handle non-numeric data
                 feature_slice = np.zeros_like(feature_slice, dtype=np.float64)
+            
+            # Add feature slice to X
             X.append(feature_slice)
 
-            # Target: Next immediate price movement (1 candle ahead)
-            current_price = df['close'].iloc[i]
-            next_price = df['close'].iloc[i + 1]
-
-            # Calculate immediate price change
-            price_change_pct = (next_price - current_price) / current_price * 100
-
-            # Less strict target: 1 for upward movement > 0.1%, 0 otherwise
-            if price_change_pct > 0.1:
-                y.append(1)  # Buy signal
-            else:
-                y.append(0)  # Hold/Sell signal
+            # Correct target definition:
+            # 1 = BUY signal (price going up significantly)  
+            # 0 = SELL signal (price going down significantly)
+            if price_change_pct > 0.3:
+                y.append(1)  # BUY signal - price going up
+            else:  # price_change_pct < -0.3 (due to earlier abs check)
+                y.append(0)  # SELL signal - price going down
 
         if len(X) == 0:
             print("Warning: No valid data after filtering")

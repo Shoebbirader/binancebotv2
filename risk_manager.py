@@ -101,7 +101,7 @@ class RiskManager:
             logging.error(f"Error calculating position size: {e}")
             return 0.001  # Minimum safe quantity
     
-    def should_enter(self, pred_accuracy, threshold):
+    def should_enter(self, pred_accuracy, threshold=0.6):
         """Enhanced entry criteria with confidence bands"""
         try:
             # Add confidence bands for better decision making

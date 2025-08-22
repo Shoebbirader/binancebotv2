@@ -194,6 +194,14 @@ def train_model_balanced(model, X, y, epochs=25, batch_size=32, lr=0.002):
         if X is None or y is None or len(X) < 10:
             print("Warning: Insufficient data for training")
             return None
+        
+        # Ensure X and y have same length
+        if len(X) != len(y):
+            print(f"Warning: X and y size mismatch: X={len(X)}, y={len(y)}")
+            min_len = min(len(X), len(y))
+            X = X[:min_len]
+            y = y[:min_len]
+            print(f"Truncated to {min_len} samples")
 
         # Simplified class balancing - use weights instead of resampling
         from collections import Counter
@@ -319,48 +327,81 @@ def predict_model(model, X):
         return 0.5
 
 def train_random_forest(X, y):
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    X_flat = X.reshape(X.shape[0], -1)
-    clf.fit(X_flat, y)
-    return clf
+    try:
+        if len(X) != len(y):
+            print(f"RandomForest: X and y size mismatch: X={len(X)}, y={len(y)}")
+            min_len = min(len(X), len(y))
+            X = X[:min_len]
+            y = y[:min_len]
+        
+        clf = RandomForestClassifier(n_estimators=50, random_state=42, max_depth=10)
+        X_flat = X.reshape(X.shape[0], -1)
+        clf.fit(X_flat, y)
+        return clf
+    except Exception as e:
+        print(f"RandomForest training failed: {e}")
+        return None
 
 def train_xgboost(X, y):
-    if xgb is None:
-        print("XGBoost not installed.")
-        return None
-    X_flat = X.reshape(X.shape[0], -1)
-    
-    # Suppress XGBoost warnings
-    import warnings
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning)
-        warnings.filterwarnings("ignore", category=FutureWarning)
+    try:
+        if xgb is None:
+            print("XGBoost not installed.")
+            return None
         
-        clf = xgb.XGBClassifier(
-            n_estimators=100, 
-            use_label_encoder=False, 
-            eval_metric='logloss',
-            verbosity=0  # Suppress training output
-        )
-        clf.fit(X_flat, y)
-    return clf
+        if len(X) != len(y):
+            print(f"XGBoost: X and y size mismatch: X={len(X)}, y={len(y)}")
+            min_len = min(len(X), len(y))
+            X = X[:min_len]
+            y = y[:min_len]
+            
+        X_flat = X.reshape(X.shape[0], -1)
+        
+        # Suppress XGBoost warnings
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            
+            clf = xgb.XGBClassifier(
+                n_estimators=50, 
+                max_depth=6,
+                use_label_encoder=False, 
+                eval_metric='logloss',
+                verbosity=0  # Suppress training output
+            )
+            clf.fit(X_flat, y)
+        return clf
+    except Exception as e:
+        print(f"XGBoost training failed: {e}")
+        return None
 
 def train_lightgbm(X, y):
-    if lgb is None:
-        print("LightGBM not installed.")
+    try:
+        if lgb is None:
+            print("LightGBM not installed.")
+            return None
+        
+        if len(X) != len(y):
+            print(f"LightGBM: X and y size mismatch: X={len(X)}, y={len(y)}")
+            min_len = min(len(X), len(y))
+            X = X[:min_len]
+            y = y[:min_len]
+            
+        X_flat = X.reshape(X.shape[0], -1)
+        clf = lgb.LGBMClassifier(
+            n_estimators=50,
+            learning_rate=0.1,
+            max_depth=6,
+            num_leaves=31,
+            min_child_samples=20,
+            random_state=42,
+            verbosity=-1
+        )
+        clf.fit(X_flat, y)
+        return clf
+    except Exception as e:
+        print(f"LightGBM training failed: {e}")
         return None
-    X_flat = X.reshape(X.shape[0], -1)
-    clf = lgb.LGBMClassifier(
-        n_estimators=50,
-        learning_rate=0.05,
-        max_depth=4,
-        num_leaves=16,
-        min_child_samples=5,
-        random_state=42,
-        verbosity=-1
-    )
-    clf.fit(X_flat, y)
-    return clf
 
 def shap_feature_importance(model, X):
     X_flat = X.reshape(X.shape[0], -1)
