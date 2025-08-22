@@ -227,9 +227,9 @@ def train_model_balanced(model, X, y, epochs=25, batch_size=32, lr=0.002):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = model.to(device)
 
-        # Optimized training setup
-        criterion = nn.BCEWithLogitsLoss()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+        # Fixed training setup for better convergence
+        criterion = nn.BCELoss()  # Changed from BCEWithLogitsLoss since sigmoid is already applied
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
         # Create fast data loaders
         train_dataset = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train))
@@ -254,8 +254,12 @@ def train_model_balanced(model, X, y, epochs=25, batch_size=32, lr=0.002):
                 
                 optimizer.zero_grad()
                 outputs = model(batch_X)
-                loss = criterion(outputs.squeeze(), batch_y.float())
+                # Ensure outputs are properly squeezed and in range [0,1]
+                outputs = torch.clamp(outputs.squeeze(), 0.001, 0.999)  # Prevent extreme values
+                loss = criterion(outputs, batch_y.float())
                 loss.backward()
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 
                 train_loss += loss.item()
@@ -270,7 +274,8 @@ def train_model_balanced(model, X, y, epochs=25, batch_size=32, lr=0.002):
                         batch_X = batch_X.unsqueeze(0)
                     
                     outputs = model(batch_X)
-                    loss = criterion(outputs.squeeze(), batch_y.float())
+                    outputs = torch.clamp(outputs.squeeze(), 0.001, 0.999)  # Prevent extreme values
+                    loss = criterion(outputs, batch_y.float())
                     val_loss += loss.item()
             
             train_loss /= len(train_loader)
@@ -297,7 +302,7 @@ def train_model_balanced(model, X, y, epochs=25, batch_size=32, lr=0.002):
 
 def predict_model(model, X):
     """
-    FIXED: Better prediction handling
+    Enhanced prediction handling with proper output validation
     """
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -317,16 +322,29 @@ def predict_model(model, X):
                 print("Warning: Empty input tensor")
                 return 0.5
             
+            # Ensure input is properly normalized
+            X_tensor = torch.nan_to_num(X_tensor, nan=0.0, posinf=1.0, neginf=-1.0)
+            
             output = model(X_tensor)
+            
+            # Ensure output is in valid range and not extreme
+            output = torch.clamp(output, 0.01, 0.99)  # Prevent extreme predictions
             prediction = output.squeeze().cpu().numpy()
             
             if isinstance(prediction, np.ndarray):
                 if len(prediction.shape) == 0:
-                    return float(prediction)
+                    pred_value = float(prediction)
                 else:
-                    return float(prediction[0])
+                    pred_value = float(prediction[0])
             else:
-                return float(prediction)
+                pred_value = float(prediction)
+            
+            # Final validation
+            if np.isnan(pred_value) or np.isinf(pred_value):
+                print("Warning: Invalid prediction, using fallback")
+                return 0.5
+            
+            return pred_value
                 
     except Exception as e:
         print(f"Prediction error: {e}")

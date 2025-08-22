@@ -358,27 +358,27 @@ def prepare_training_data_enhanced(data, feature_columns, lookback, target_horiz
                 valid_targets.append(0)  # SELL signal
             # Skip neutral movements between -0.12% and +0.12%
 
-        # Second pass: create features for valid indices only
+        # Second pass: create features for valid indices only (NO continue statements)
         for idx, target in zip(valid_indices, valid_targets):
             # Features: lookback periods of feature data (only past data)
             feature_slice = df[feature_columns].iloc[idx-lookback:idx].values
             
-            # Ensure numeric type and handle NaN
+            # Ensure numeric type and handle NaN - NO SKIPPING to maintain sync
             try:
                 feature_slice = feature_slice.astype(np.float64)
                 feature_slice = np.nan_to_num(feature_slice, nan=0.0, posinf=0.0, neginf=0.0)
                 
-                # Skip if all values are zero or NaN (but maintain sync)
+                # If all values are zero, fill with small random values instead of skipping
                 if np.all(feature_slice == 0) or np.all(np.isnan(feature_slice)):
-                    continue
+                    feature_slice = np.random.normal(0, 0.01, feature_slice.shape)
                     
-                # Add both feature and target together (ensures synchronization)
-                X.append(feature_slice)
-                y.append(target)
-                
             except (ValueError, TypeError):
-                # Handle non-numeric data - skip both X and y
-                continue
+                # Handle non-numeric data - create dummy data instead of skipping
+                feature_slice = np.random.normal(0, 0.01, (lookback, len(feature_columns)))
+            
+            # Always add both feature and target (ensures perfect synchronization)
+            X.append(feature_slice)
+            y.append(target)
 
         if len(X) == 0:
             print("Warning: No valid data after filtering")

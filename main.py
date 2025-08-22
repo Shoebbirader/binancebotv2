@@ -24,6 +24,7 @@ from ensemble_predictor import EnhancedEnsemble, ensemble_predictor
 from model_performance_tracker import performance_tracker
 from position_monitor import PositionMonitor
 from data_synchronizer import validate_training_data, synchronize_arrays
+from model_cleanup import model_file_manager
 import warnings
 warnings.filterwarnings('ignore')
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -63,6 +64,26 @@ def main():
     from market_regime import MarketRegimeDetector
     regime_detector = MarketRegimeDetector()
     model_manager = ModelManager()
+    
+    # Perform model cleanup before training
+    try:
+        print("🧹 Checking model storage...")
+        storage_stats = model_file_manager.get_storage_stats()
+        print(f"📦 Current storage: {storage_stats['total_files']} files, {storage_stats['total_size_mb']:.1f}MB")
+        
+        # Emergency cleanup if too many files
+        if storage_stats['total_files'] > 200:
+            model_file_manager.emergency_cleanup(max_files=100)
+        else:
+            # Regular cleanup
+            model_file_manager.cleanup_old_models()
+        
+        # Show updated stats
+        storage_stats = model_file_manager.get_storage_stats()
+        print(f"📦 After cleanup: {storage_stats['total_files']} files, {storage_stats['total_size_mb']:.1f}MB")
+        
+    except Exception as e:
+        log_warning(f"Model cleanup failed: {e}")
 
     # Initialize trading interface (Paper or Live)
     try:
@@ -379,8 +400,14 @@ def main():
     # Start position monitoring for paper trading
     if config.get('paper_trading', False):
         position_monitor = PositionMonitor(binance, risk_manager)
-        position_monitor.start_monitoring(check_interval=60)  # Check every minute
+        position_monitor.start_monitoring(check_interval=30)  # Check every 30 seconds
         print("📊 Position monitoring started for paper trading")
+        
+        # Immediately check for any existing positions that need closing
+        try:
+            monitor_positions(risk_manager, binance, config)
+        except Exception as e:
+            log_warning(f"Initial position check failed: {e}")
 
     # Portfolio optimization: correlation and risk parity
     if price_data_dict:
@@ -394,6 +421,12 @@ def main():
         process_symbol._rp_weights = rp_weights
 
     print("\n✅ Bot processing complete!")
+    
+    # Final cleanup after training cycle
+    try:
+        model_file_manager.cleanup_old_models()
+    except Exception as e:
+        log_warning(f"Final model cleanup failed: {e}")
 
     # Show position summary
     summary = risk_manager.get_position_summary()
@@ -787,14 +820,25 @@ def execute_live_trade(symbol, action, confidence, risk_manager, binance, config
         print(f"❌ Live trade execution failed: {e}")
 
 def monitor_positions(risk_manager, binance, config):
-    """Monitor active positions for stop-loss and take-profit"""
+    """Monitor active positions for stop-loss and take-profit with forced position updates"""
     try:
-        print("\n🔍 Monitoring active positions...")
+        active_symbols = list(risk_manager.active_positions.keys())
+        if not active_symbols:
+            return
+            
+        print(f"\n🔍 Monitoring {len(active_symbols)} active positions...")
         
-        for symbol in list(risk_manager.active_positions.keys()):
+        for symbol in active_symbols:
             try:
                 # Get current price
                 current_price = binance.get_current_price(symbol)
+                if current_price is None:
+                    log_warning(f"Could not get current price for {symbol}")
+                    continue
+                
+                # Force update position prices for paper trading
+                if hasattr(binance, 'update_prices'):
+                    binance.update_prices({symbol: current_price})
                 
                 # Check for exit signals
                 exit_signal, position = risk_manager.update_position(symbol, current_price)
@@ -802,29 +846,36 @@ def monitor_positions(risk_manager, binance, config):
                 if exit_signal:
                     print(f"🚨 {exit_signal} triggered for {symbol} at {current_price}")
                     
-                    # Close position (with error handling)
+                    # Close position (with proper error handling)
                     try:
                         close_side = 'SELL' if position['side'] == 'BUY' else 'BUY'
-                        if hasattr(binance, 'close_position'):
-                            binance.close_position(symbol, close_side, abs(position['quantity']))
-                        else:
-                            # For paper trading, close position directly
-                            binance.close_position(symbol, close_side, abs(position['quantity']))
                         
-                        # Cancel any remaining open orders if method exists
+                        # Close position using paper trading interface
+                        close_result = binance.close_position(symbol, close_side, abs(position['quantity']))
+                        
+                        if close_result.get('status') == 'FILLED':
+                            # Update tracking only if close was successful
+                            risk_manager.close_position_tracking(symbol, current_price, exit_signal)
+                            print(f"✅ Position closed successfully: {symbol} {exit_signal}")
+                        else:
+                            log_warning(f"Position close failed for {symbol}: {close_result}")
+                        
+                        # Cancel any remaining orders if supported
                         if hasattr(binance, 'cancel_all_open_orders'):
                             try:
                                 binance.cancel_all_open_orders(symbol)
                             except Exception as e:
-                                log_warning(f"Failed to cancel remaining orders for {symbol}: {e}")
-                        
-                        # Update tracking
-                        risk_manager.close_position_tracking(symbol, current_price, exit_signal)
+                                log_warning(f"Failed to cancel orders for {symbol}: {e}")
                         
                     except Exception as e:
                         log_error(f"Failed to close position for {symbol}: {e}")
-                    
-                    print(f"✅ Position closed: {symbol} {exit_signal}")
+                else:
+                    # Update unrealized P&L for active position
+                    if hasattr(binance, '_update_position_pnl'):
+                        try:
+                            binance._update_position_pnl(symbol, current_price)
+                        except Exception as e:
+                            log_warning(f"Failed to update P&L for {symbol}: {e}")
                 
             except Exception as e:
                 log_error(f"Error monitoring position {symbol}: {e}")

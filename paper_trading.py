@@ -217,58 +217,61 @@ class PaperTradingInterface:
             return {'orderId': f"close_{int(time.time() * 1000)}", 'status': 'FILLED'}
     
     def _update_position_pnl(self, symbol: str, current_price: float):
-        """Update unrealized P&L for active positions with thread safety"""
-        # First check if position exists without holding lock too long
-        if symbol not in self.positions:
-            return
-            
-        # Get position info atomically
+        """Update unrealized P&L for active positions with complete thread safety"""
+        should_close = False
+        close_side = None
+        close_quantity = None
+        position_copy = None
+        
+        # Single atomic operation to check position and determine action
         with self._lock:
             if symbol not in self.positions:
                 return
-            position = dict(self.positions[symbol])  # Create copy to work with
-            
-        # Calculate P&L outside of lock (quantity is actual position size, not leveraged)
-        if position['side'] == 'LONG':
-            pnl = (current_price - position['entry_price']) * position['quantity']
-        else:
-            pnl = (position['entry_price'] - current_price) * position['quantity']
-            
-        # Update P&L atomically
-        with self._lock:
-            if symbol in self.positions:
-                self.positions[symbol]['unrealized_pnl'] = pnl
                 
-        # Check exit conditions and close if needed (this calls close_position which has its own lock)
-        # Only check exit conditions if position still exists (avoid race conditions)
-        if symbol in self.positions:
+            position = self.positions[symbol]
+            
+            # Calculate P&L (quantity is actual position size, not leveraged)
+            if position['side'] == 'LONG':
+                pnl = (current_price - position['entry_price']) * position['quantity']
+            else:
+                pnl = (position['entry_price'] - current_price) * position['quantity']
+            
+            # Update P&L
+            position['unrealized_pnl'] = pnl
+            
+            # Check exit conditions while holding lock
+            position_copy = dict(position)  # Copy for use outside lock
+            
+            # Check stop loss
             if position.get('stop_loss'):
                 if position['side'] == 'LONG' and current_price <= position['stop_loss']:
-                    try:
-                        self.close_position(symbol, 'SELL', position['quantity'])
-                        logging.info(f"Paper trading: Stop loss triggered for {symbol}")
-                    except Exception as e:
-                        logging.warning(f"Failed to close position on stop loss: {e}")
+                    should_close = True
+                    close_side = 'SELL'
+                    close_quantity = position['quantity']
                 elif position['side'] == 'SHORT' and current_price >= position['stop_loss']:
-                    try:
-                        self.close_position(symbol, 'BUY', position['quantity'])
-                        logging.info(f"Paper trading: Stop loss triggered for {symbol}")
-                    except Exception as e:
-                        logging.warning(f"Failed to close position on stop loss: {e}")
-                    
-            if symbol in self.positions and position.get('take_profit'):
+                    should_close = True
+                    close_side = 'BUY'
+                    close_quantity = position['quantity']
+            
+            # Check take profit (only if no stop loss triggered)
+            if not should_close and position.get('take_profit'):
                 if position['side'] == 'LONG' and current_price >= position['take_profit']:
-                    try:
-                        self.close_position(symbol, 'SELL', position['quantity'])
-                        logging.info(f"Paper trading: Take profit triggered for {symbol}")
-                    except Exception as e:
-                        logging.warning(f"Failed to close position on take profit: {e}")
+                    should_close = True
+                    close_side = 'SELL'
+                    close_quantity = position['quantity']
                 elif position['side'] == 'SHORT' and current_price <= position['take_profit']:
-                    try:
-                        self.close_position(symbol, 'BUY', position['quantity'])
-                        logging.info(f"Paper trading: Take profit triggered for {symbol}")
-                    except Exception as e:
-                        logging.warning(f"Failed to close position on take profit: {e}")
+                    should_close = True
+                    close_side = 'BUY'
+                    close_quantity = position['quantity']
+        
+        # Execute close outside of lock if needed
+        if should_close:
+            try:
+                self.close_position(symbol, close_side, close_quantity)
+                exit_reason = "Stop loss" if position_copy.get('stop_loss') else "Take profit"
+                logging.info(f"Paper trading: {exit_reason} triggered for {symbol}")
+            except Exception as e:
+                logging.warning(f"Failed to close position: {e}")
 
     def log_latency(self, start_time, end_time):
         """Simulate latency logging for paper trading"""

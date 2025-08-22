@@ -34,7 +34,7 @@ class ModelPerformanceTracker:
     
     def record_prediction(self, symbol: str, model_type: str, prediction: float, 
                          confidence: float, actual_outcome: int = None):
-        """Record a model prediction for performance tracking"""
+        """Record a model prediction for performance tracking with memory management"""
         timestamp = datetime.now().isoformat()
         
         if symbol not in self.performance_data:
@@ -51,11 +51,45 @@ class ModelPerformanceTracker:
         
         self.performance_data[symbol][model_type].append(record)
         
-        # Keep only last 1000 records per model
-        if len(self.performance_data[symbol][model_type]) > 1000:
-            self.performance_data[symbol][model_type] = self.performance_data[symbol][model_type][-500:]
+        # Keep only last 500 records per model (reduced from 1000)
+        if len(self.performance_data[symbol][model_type]) > 500:
+            self.performance_data[symbol][model_type] = self.performance_data[symbol][model_type][-250:]
+        
+        # Periodic cleanup of old data (every 100 records)
+        if len(self.performance_data[symbol][model_type]) % 100 == 0:
+            self._cleanup_old_performance_data()
         
         self._save_performance_data()
+    
+    def _cleanup_old_performance_data(self):
+        """Remove performance data older than 30 days"""
+        try:
+            cutoff_date = datetime.now() - timedelta(days=30)
+            
+            for symbol in list(self.performance_data.keys()):
+                for model_type in list(self.performance_data[symbol].keys()):
+                    original_count = len(self.performance_data[symbol][model_type])
+                    
+                    # Keep only recent records
+                    self.performance_data[symbol][model_type] = [
+                        record for record in self.performance_data[symbol][model_type]
+                        if datetime.fromisoformat(record['timestamp']) > cutoff_date
+                    ]
+                    
+                    cleaned_count = len(self.performance_data[symbol][model_type])
+                    if original_count > cleaned_count:
+                        logging.info(f"Cleaned {original_count - cleaned_count} old records for {symbol}_{model_type}")
+                    
+                    # Remove empty model entries
+                    if cleaned_count == 0:
+                        del self.performance_data[symbol][model_type]
+                
+                # Remove empty symbol entries
+                if not self.performance_data[symbol]:
+                    del self.performance_data[symbol]
+                    
+        except Exception as e:
+            logging.error(f"Error cleaning old performance data: {e}")
     
     def get_model_accuracy(self, symbol: str, model_type: str, days: int = 7) -> float:
         """Calculate model accuracy over the last N days"""

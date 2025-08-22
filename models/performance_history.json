@@ -12,6 +12,12 @@
         "prediction": 0.0004113109316676855,
         "confidence": 0.5,
         "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:17:03.830320",
+        "prediction": 0.48330333828926086,
+        "confidence": 0.5,
+        "actual_outcome": null
       }
     ]
   },
@@ -26,6 +32,12 @@
       {
         "timestamp": "2025-08-22T18:43:50.280452",
         "prediction": 5.165805418982927e-07,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:15:36.194770",
+        "prediction": 0.4987950921058655,
         "confidence": 0.5,
         "actual_outcome": null
       }
@@ -44,6 +56,12 @@
         "prediction": 5.0198796088807285e-05,
         "confidence": 0.5,
         "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:18:19.602788",
+        "prediction": 0.4804295301437378,
+        "confidence": 0.5,
+        "actual_outcome": null
       }
     ]
   },
@@ -58,6 +76,12 @@
       {
         "timestamp": "2025-08-22T18:41:52.560350",
         "prediction": 1.234630781254964e-05,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:15:55.388776",
+        "prediction": 0.48679888248443604,
         "confidence": 0.5,
         "actual_outcome": null
       }
@@ -76,6 +100,12 @@
         "prediction": 0.012496864423155785,
         "confidence": 0.5,
         "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:18:06.730371",
+        "prediction": 0.5190120339393616,
+        "confidence": 0.5,
+        "actual_outcome": null
       }
     ]
   },
@@ -90,6 +120,12 @@
       {
         "timestamp": "2025-08-22T18:46:59.769577",
         "prediction": 0.009727377444505692,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:17:25.414460",
+        "prediction": 0.5127200484275818,
         "confidence": 0.5,
         "actual_outcome": null
       }
@@ -108,6 +144,12 @@
         "prediction": 1.5340626191573392e-07,
         "confidence": 0.5,
         "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:19:20.210812",
+        "prediction": 0.47603723406791687,
+        "confidence": 0.5,
+        "actual_outcome": null
       }
     ]
   },
@@ -122,6 +164,12 @@
       {
         "timestamp": "2025-08-22T18:51:38.198897",
         "prediction": 2.3443561758540454e-07,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:19:29.476487",
+        "prediction": 0.49473389983177185,
         "confidence": 0.5,
         "actual_outcome": null
       }
@@ -140,6 +188,12 @@
         "prediction": 4.1826702101843694e-08,
         "confidence": 0.5,
         "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:21:32.816005",
+        "prediction": 0.48450833559036255,
+        "confidence": 0.5,
+        "actual_outcome": null
       }
     ]
   },
@@ -156,6 +210,12 @@
         "prediction": 3.221684607979114e-08,
         "confidence": 0.5,
         "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:20:23.754043",
+        "prediction": 0.49936267733573914,
+        "confidence": 0.5,
+        "actual_outcome": null
       }
     ]
   },
@@ -170,6 +230,12 @@
       {
         "timestamp": "2025-08-22T18:58:40.862826",
         "prediction": 1.0684464868404575e-08,
+        "confidence": 0.5,
+        "actual_outcome": null
+      },
+      {
+        "timestamp": "2025-08-22T21:20:30.922263",
+        "prediction": 0.4871518015861511,
         "confidence": 0.5,
         "actual_outcome": null
       }
